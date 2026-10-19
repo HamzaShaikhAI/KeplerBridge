@@ -59,3 +59,36 @@ add_custom_command(TARGET d3d12 POST_BUILD
         "$<TARGET_FILE_DIR:d3d12>/kepler_bridge.ini"
     COMMENT "Deploying kepler_bridge.ini to output directory"
 )
+
+# Test Targets
+add_executable(test_policy_engine
+    tests/test_policy_engine.cpp
+    src/feature_level_compat.cpp
+    src/logger.cpp
+    src/config.cpp
+    src/proxy_loader.cpp
+)
+target_include_directories(test_policy_engine PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+target_link_libraries(test_policy_engine PRIVATE dxgi dxguid user32)
+if(NOT MSVC)
+    target_link_options(test_policy_engine PRIVATE -static -static-libgcc -static-libstdc++)
+endif()
+
+add_executable(test_d3d12_compat
+    tests/test_d3d12_compat.cpp
+)
+target_include_directories(test_d3d12_compat PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+target_link_libraries(test_d3d12_compat PRIVATE dxgi dxguid user32)
+if(NOT MSVC)
+    target_link_options(test_d3d12_compat PRIVATE -static -static-libgcc -static-libstdc++)
+endif()
+
+add_executable(test_d3d12
+    tests/test_d3d12.cpp
+)
+target_include_directories(test_d3d12 PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+target_link_libraries(test_d3d12 PRIVATE dxgi dxguid user32)
+if(NOT MSVC)
+    target_link_options(test_d3d12 PRIVATE -static -static-libgcc -static-libstdc++)
+endif()
+

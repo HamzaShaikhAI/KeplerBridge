@@ -7,7 +7,7 @@ Modular 64-bit DirectX 12-to-DirectX 11 Translation, Downgrade & Feature Level C
 ## Current Status
 
 * **Phase 1: The Ghost Hook (DLL Proxy & Telemetry Logger)**: **COMPLETE & AUDITED**
-* **Phase 2: Feature Level Compatibility Engine**: **COMPLETE & VERIFIED**
+* **Phase 2: Feature Level Compatibility Engine**: **COMPLETE & VERIFIED (PASS WITH LIMITATIONS)**
 * **Phase 3: Shader Model Transpiler & Asset Downgrader**: *Planned*
 * **Phase 4: D3D11 Fallback Translation & State Emulation**: *Planned*
 
@@ -23,10 +23,12 @@ Modular 64-bit DirectX 12-to-DirectX 11 Translation, Downgrade & Feature Level C
    * Millisecond-precision timestamps, thread IDs, adapter specifications, requested feature levels, COM REFIIDs, and HRESULT return codes.
    * Unbuffered immediate flush after every write to preserve diagnostics even across host application crashes.
 3. **Feature Level Compatibility Engine (`FeatureLevelCompat`)**:
-   * Dynamic hardware capability detection: probes adapter for maximum native Direct3D 12 feature level (e.g. `D3D_FEATURE_LEVEL_11_0` on Kepler GT 740).
-   * Policy-driven interception: intercepts `D3D12CreateDevice` requests requesting `D3D_FEATURE_LEVEL_12_0+`, creates the native device at the hardware's maximum native level (`11_0`), and attaches dynamic vtable shadowing.
-   * Intercepts `CheckFeatureSupport(D3D12_FEATURE_FEATURE_LEVELS)` to report `D3D_FEATURE_LEVEL_12_0`, bypassing engine boot checks.
-   * Real driver capability reporting: all other feature queries (shader models, formats, architectures) pass through to the real driver.
+   * **Cached Hardware Detection**: probes physical adapter once for maximum native Direct3D 12 feature level (`D3D_FEATURE_LEVEL_11_0` on Kepler GT 740) and caches the result.
+   * **Pure Policy Evaluation**: decoupled, deterministic rule engine evaluates whether interception is required.
+   * **ABI-Safe COM Wrapper (`WrappedD3D12Device`)**: replaces fragile vtable shadowing with standard C++ COM delegation and atomic reference counting. Supports `ID3D12Device` and `ID3D12Device1`.
+   * **Feature Level Spoofing**: intercepts `D3D12CreateDevice` requests for `D3D_FEATURE_LEVEL_12_0+`, creates the native device at `11_0`, wraps it, and intercepts `CheckFeatureSupport(D3D12_FEATURE_FEATURE_LEVELS)` to report `D3D_FEATURE_LEVEL_12_0`.
+   * **Native Driver Passthrough**: all other hardware feature queries (Shader Model, Resource Binding Tier, Conservative Rasterization) pass through to the real NVIDIA Kepler driver without fabricating unsupported capabilities.
+   * **Strict Default Safety**: `EnableFeatureLevelSpoof=0` by default; 100% untouched native passthrough when disabled.
 
 ---
 
@@ -38,7 +40,7 @@ EnableLogging=1
 LogVerboseCalls=1
 
 [Spoof]
-EnableFeatureLevelSpoof=1
+EnableFeatureLevelSpoof=0
 TargetFeatureLevel=12_0
 SpoofVRAMMB=4096
 
@@ -47,8 +49,8 @@ MaxTextureResolution=512
 StripHeavyShaders=1
 ```
 
-* `EnableFeatureLevelSpoof=1`: Enables the Compatibility Engine to downgrade native creation to `11_0` and spoof `12_0` in `CheckFeatureSupport`.
-* `EnableFeatureLevelSpoof=0`: Pure passthrough mode (Phase 1 behavior).
+* `EnableFeatureLevelSpoof=0` (default): Pure passthrough mode (Phase 1 behavior).
+* `EnableFeatureLevelSpoof=1`: Enables the Compatibility Engine to downgrade native creation to `11_0` and report `12_0` in `CheckFeatureSupport`.
 
 ---
 
@@ -65,24 +67,29 @@ StripHeavyShaders=1
 # Configure x64 Release
 cmake -B build -G "Ninja" -DCMAKE_BUILD_TYPE=Release
 
-# Build d3d12.dll and deploy kepler_bridge.ini
+# Build all binaries (d3d12.dll and test executables)
 cmake --build build --config Release
 ```
 
 Build outputs in `build/`:
 * `d3d12.dll`
 * `kepler_bridge.ini`
+* `test_policy_engine.exe`
+* `test_d3d12_compat.exe`
+* `test_d3d12.exe`
 
 ---
 
 ## Running Verification Tests
 
 ```powershell
-# 1. Pure Policy Engine Unit Tests (No GPU required)
+# 1. Pure Policy Engine Unit Tests (No GPU required, 6/6 tests)
 ./build/test_policy_engine.exe
 
 # 2. Live Hardware Direct3D 12 Verification Suite (Runs against physical GPU)
-./build/test_d3d12_compat.exe
+cd build
+./test_d3d12_compat.exe
+cd ..
 ```
 
 ---

@@ -203,15 +203,51 @@ HRESULT WINAPI D3D12CreateDevice(
 
     LOG_INFO("[COMPAT] Policy Evaluation: " + policy.reason);
     if (policy.should_intercept) {
-        LOG_HOOK("[COMPAT] Modifying device creation target: MinimumFeatureLevel " +
+        LOG_HOOK("[COMPAT] Intercepting device creation: MinimumFeatureLevel " +
                  Logger::FeatureLevelToString(MinimumFeatureLevel) + " -> " +
                  Logger::FeatureLevelToString(policy.creation_level) +
                  " (Target Spoofed Level: " + Logger::FeatureLevelToString(policy.target_spoof_level) + ")");
+
+        // If ppDevice is null, caller only tests if device creation would succeed
+        if (!ppDevice) {
+            HRESULT hrProbe = loader.RealD3D12CreateDevice(pAdapter, policy.creation_level, riid, nullptr);
+            LOG_HOOK("Returned HRESULT (Probe): " + Logger::HResultToString(hrProbe));
+            LOG_HOOK("============================================");
+            return hrProbe;
+        }
+
+        // Create the underlying real hardware device at native capability level
+        ID3D12Device* pRealDevice = nullptr;
+        HRESULT hr = loader.RealD3D12CreateDevice(pAdapter, policy.creation_level, __uuidof(ID3D12Device), reinterpret_cast<void**>(&pRealDevice));
+        LOG_HOOK("Returned HRESULT (Native Real): " + Logger::HResultToString(hr));
+
+        if (FAILED(hr) || !pRealDevice) {
+            LOG_DIAGNOSTIC("[DIAGNOSTIC] Real hardware rejected device creation! Return code: " + Logger::HResultToString(hr));
+            *ppDevice = nullptr;
+            LOG_HOOK("============================================");
+            return hr;
+        }
+
+        // Wrap the real device in our ABI-safe COM compatibility wrapper
+        void* pWrapped = nullptr;
+        HRESULT hrWrap = compat.WrapDevice(pRealDevice, policy.target_spoof_level, riid, &pWrapped);
+        pRealDevice->Release(); // WrapDevice holds internal reference; release the creation ref
+
+        if (SUCCEEDED(hrWrap) && pWrapped) {
+            *ppDevice = pWrapped;
+            LOG_HOOK("[COMPAT] Successfully wrapped ID3D12Device with COM compatibility wrapper.");
+            LOG_HOOK("============================================");
+            return S_OK;
+        } else {
+            LOG_ERROR("[COMPAT] Failed to wrap ID3D12Device: " + Logger::HResultToString(hrWrap));
+            *ppDevice = nullptr;
+            LOG_HOOK("============================================");
+            return hrWrap;
+        }
     }
 
-    // Call Real System32 D3D12CreateDevice using policy-directed level
-    HRESULT hr = loader.RealD3D12CreateDevice(pAdapter, policy.creation_level, riid, ppDevice);
-
+    // Native passthrough path (unmodified call to real d3d12.dll)
+    HRESULT hr = loader.RealD3D12CreateDevice(pAdapter, MinimumFeatureLevel, riid, ppDevice);
     LOG_HOOK("Returned HRESULT: " + Logger::HResultToString(hr));
 
     if (FAILED(hr)) {
@@ -219,17 +255,6 @@ HRESULT WINAPI D3D12CreateDevice(
     } else {
         LOG_INFO("Real D3D12CreateDevice succeeded. Device pointer: " +
                  (ppDevice && *ppDevice ? std::string("Non-null") : std::string("null")));
-
-        // If compatibility spoofing was active and device succeeded, attach compatibility vtable hook
-        if (policy.should_intercept && ppDevice && *ppDevice) {
-            bool hooked = compat.InstallDeviceHooks(
-                reinterpret_cast<ID3D12Device*>(*ppDevice), policy.target_spoof_level);
-            if (hooked) {
-                LOG_HOOK("[COMPAT] Compatibility engine successfully attached to created ID3D12Device.");
-            } else {
-                LOG_WARN("[COMPAT] Failed to attach compatibility engine hooks to created device.");
-            }
-        }
     }
 
     LOG_HOOK("============================================");
