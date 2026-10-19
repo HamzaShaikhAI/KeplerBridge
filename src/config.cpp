@@ -35,8 +35,11 @@ bool Config::Load(const std::string& iniFilePath) {
     m_spoofVRAMMB = static_cast<uint32_t>(GetPrivateProfileIntA("Spoof", "SpoofVRAMMB", 4096, iniFilePath.c_str()));
 
     // [Downgrader]
+    m_enableShaderInspection = GetPrivateProfileIntA("Downgrader", "EnableShaderInspection", 1, iniFilePath.c_str()) != 0;
+    m_enableShaderFallback = GetPrivateProfileIntA("Downgrader", "EnableShaderFallback", 0, iniFilePath.c_str()) != 0;
+    m_enableTextureClamping = GetPrivateProfileIntA("Downgrader", "EnableTextureClamping", 0, iniFilePath.c_str()) != 0;
     m_maxTextureResolution = static_cast<uint32_t>(GetPrivateProfileIntA("Downgrader", "MaxTextureResolution", 512, iniFilePath.c_str()));
-    m_stripHeavyShaders = GetPrivateProfileIntA("Downgrader", "StripHeavyShaders", 1, iniFilePath.c_str()) != 0;
+    m_stripHeavyShaders = GetPrivateProfileIntA("Downgrader", "StripHeavyShaders", 0, iniFilePath.c_str()) != 0;
 
     LOG_INFO("Successfully loaded configuration from: " + iniFilePath);
     return true;
@@ -49,6 +52,9 @@ void Config::LogSettings() const {
     LOG_INFO("  [Spoof] EnableFeatureLevelSpoof: " + std::string(m_enableFeatureLevelSpoof ? "true" : "false"));
     LOG_INFO("  [Spoof] TargetFeatureLevel: " + m_targetFeatureLevel);
     LOG_INFO("  [Spoof] SpoofVRAMMB: " + std::to_string(m_spoofVRAMMB) + " MB");
+    LOG_INFO("  [Downgrader] EnableShaderInspection: " + std::string(m_enableShaderInspection ? "true" : "false"));
+    LOG_INFO("  [Downgrader] EnableShaderFallback: " + std::string(m_enableShaderFallback ? "true" : "false"));
+    LOG_INFO("  [Downgrader] EnableTextureClamping: " + std::string(m_enableTextureClamping ? "true" : "false"));
     LOG_INFO("  [Downgrader] MaxTextureResolution: " + std::to_string(m_maxTextureResolution));
     LOG_INFO("  [Downgrader] StripHeavyShaders: " + std::string(m_stripHeavyShaders ? "true" : "false"));
     LOG_INFO("----------------------------------");

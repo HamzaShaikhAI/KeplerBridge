@@ -21,6 +21,9 @@ public:
     uint32_t GetSpoofVRAMMB() const { return m_spoofVRAMMB; }
 
     // Downgrader settings
+    bool IsShaderInspectionEnabled() const { return m_enableShaderInspection; }
+    bool IsShaderFallbackEnabled() const { return m_enableShaderFallback; }
+    bool IsTextureClampingEnabled() const { return m_enableTextureClamping; }
     uint32_t GetMaxTextureResolution() const { return m_maxTextureResolution; }
     bool ShouldStripHeavyShaders() const { return m_stripHeavyShaders; }
 
@@ -39,8 +42,11 @@ private:
     std::string m_targetFeatureLevel = "12_0";
     uint32_t m_spoofVRAMMB = 4096;
 
+    bool m_enableShaderInspection = true;
+    bool m_enableShaderFallback = false;
+    bool m_enableTextureClamping = false;
     uint32_t m_maxTextureResolution = 512;
-    bool m_stripHeavyShaders = true;
+    bool m_stripHeavyShaders = false;
 
     std::string m_configFilePath;
 };

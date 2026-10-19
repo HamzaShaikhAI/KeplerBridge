@@ -2,6 +2,8 @@
 #include "core/proxy_loader.h"
 #include "core/logger.h"
 #include "core/config.h"
+#include "downgrader/pso_hook.h"
+#include "downgrader/texture_clamper.h"
 
 #include <algorithm>
 #include <sstream>
@@ -102,11 +104,11 @@ HRESULT STDMETHODCALLTYPE WrappedD3D12Device::CreateCommandAllocator(D3D12_COMMA
 }
 
 HRESULT STDMETHODCALLTYPE WrappedD3D12Device::CreateGraphicsPipelineState(const D3D12_GRAPHICS_PIPELINE_STATE_DESC* pDesc, REFIID riid, void** ppPipelineState) {
-    return m_pReal ? m_pReal->CreateGraphicsPipelineState(pDesc, riid, ppPipelineState) : E_FAIL;
+    return PSOHook::InterceptCreateGraphicsPipelineState(m_pReal, pDesc, riid, ppPipelineState);
 }
 
 HRESULT STDMETHODCALLTYPE WrappedD3D12Device::CreateComputePipelineState(const D3D12_COMPUTE_PIPELINE_STATE_DESC* pDesc, REFIID riid, void** ppPipelineState) {
-    return m_pReal ? m_pReal->CreateComputePipelineState(pDesc, riid, ppPipelineState) : E_FAIL;
+    return PSOHook::InterceptCreateComputePipelineState(m_pReal, pDesc, riid, ppPipelineState);
 }
 
 HRESULT STDMETHODCALLTYPE WrappedD3D12Device::CreateCommandList(UINT nodeMask, D3D12_COMMAND_LIST_TYPE type, ID3D12CommandAllocator* pCommandAllocator, ID3D12PipelineState* pInitialState, REFIID riid, void** ppCommandList) {
@@ -202,7 +204,13 @@ D3D12_HEAP_PROPERTIES* STDMETHODCALLTYPE WrappedD3D12Device::GetCustomHeapProper
 }
 
 HRESULT STDMETHODCALLTYPE WrappedD3D12Device::CreateCommittedResource(const D3D12_HEAP_PROPERTIES* pHeapProperties, D3D12_HEAP_FLAGS HeapFlags, const D3D12_RESOURCE_DESC* pDesc, D3D12_RESOURCE_STATES InitialResourceState, const D3D12_CLEAR_VALUE* pOptimizedClearValue, REFIID riidResource, void** ppvResource) {
-    return m_pReal ? m_pReal->CreateCommittedResource(pHeapProperties, HeapFlags, pDesc, InitialResourceState, pOptimizedClearValue, riidResource, ppvResource) : E_FAIL;
+    if (!m_pReal) return E_FAIL;
+    auto val = TextureClamper::Instance().ValidateAndClamp(pDesc, pHeapProperties, HeapFlags);
+    if (Config::Instance().IsVerboseCallsEnabled()) {
+        LOG_HOOK("[RESOURCE] CreateCommittedResource: " + val.diagnostics);
+    }
+    const D3D12_RESOURCE_DESC* effectiveDesc = val.isModified ? &val.modifiedDesc : pDesc;
+    return m_pReal->CreateCommittedResource(pHeapProperties, HeapFlags, effectiveDesc, InitialResourceState, pOptimizedClearValue, riidResource, ppvResource);
 }
 
 HRESULT STDMETHODCALLTYPE WrappedD3D12Device::CreateHeap(const D3D12_HEAP_DESC* pDesc, REFIID riid, void** ppvHeap) {
@@ -210,11 +218,23 @@ HRESULT STDMETHODCALLTYPE WrappedD3D12Device::CreateHeap(const D3D12_HEAP_DESC* 
 }
 
 HRESULT STDMETHODCALLTYPE WrappedD3D12Device::CreatePlacedResource(ID3D12Heap* pHeap, UINT64 HeapOffset, const D3D12_RESOURCE_DESC* pDesc, D3D12_RESOURCE_STATES InitialState, const D3D12_CLEAR_VALUE* pOptimizedClearValue, REFIID riid, void** ppvResource) {
-    return m_pReal ? m_pReal->CreatePlacedResource(pHeap, HeapOffset, pDesc, InitialState, pOptimizedClearValue, riid, ppvResource) : E_FAIL;
+    if (!m_pReal) return E_FAIL;
+    auto val = TextureClamper::Instance().ValidateAndClamp(pDesc, nullptr, D3D12_HEAP_FLAG_NONE);
+    if (Config::Instance().IsVerboseCallsEnabled()) {
+        LOG_HOOK("[RESOURCE] CreatePlacedResource: " + val.diagnostics);
+    }
+    const D3D12_RESOURCE_DESC* effectiveDesc = val.isModified ? &val.modifiedDesc : pDesc;
+    return m_pReal->CreatePlacedResource(pHeap, HeapOffset, effectiveDesc, InitialState, pOptimizedClearValue, riid, ppvResource);
 }
 
 HRESULT STDMETHODCALLTYPE WrappedD3D12Device::CreateReservedResource(const D3D12_RESOURCE_DESC* pDesc, D3D12_RESOURCE_STATES InitialState, const D3D12_CLEAR_VALUE* pOptimizedClearValue, REFIID riid, void** ppvResource) {
-    return m_pReal ? m_pReal->CreateReservedResource(pDesc, InitialState, pOptimizedClearValue, riid, ppvResource) : E_FAIL;
+    if (!m_pReal) return E_FAIL;
+    auto val = TextureClamper::Instance().ValidateAndClamp(pDesc, nullptr, D3D12_HEAP_FLAG_NONE);
+    if (Config::Instance().IsVerboseCallsEnabled()) {
+        LOG_HOOK("[RESOURCE] CreateReservedResource: " + val.diagnostics);
+    }
+    const D3D12_RESOURCE_DESC* effectiveDesc = val.isModified ? &val.modifiedDesc : pDesc;
+    return m_pReal->CreateReservedResource(effectiveDesc, InitialState, pOptimizedClearValue, riid, ppvResource);
 }
 
 HRESULT STDMETHODCALLTYPE WrappedD3D12Device::CreateSharedHandle(ID3D12DeviceChild* pObject, const SECURITY_ATTRIBUTES* pAttributes, DWORD Access, LPCWSTR Name, HANDLE* pHandle) {

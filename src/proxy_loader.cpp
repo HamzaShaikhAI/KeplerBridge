@@ -201,16 +201,23 @@ HRESULT WINAPI D3D12CreateDevice(
         nativeMaxLevel,
         MinimumFeatureLevel);
 
+    bool needsWrapper = policy.should_intercept ||
+                        Config::Instance().IsTextureClampingEnabled() ||
+                        Config::Instance().IsShaderFallbackEnabled();
+
     LOG_INFO("[COMPAT] Policy Evaluation: " + policy.reason);
-    if (policy.should_intercept) {
+    if (needsWrapper) {
+        D3D_FEATURE_LEVEL creationLevel = policy.should_intercept ? policy.creation_level : MinimumFeatureLevel;
+        D3D_FEATURE_LEVEL spoofLevel = policy.should_intercept ? policy.target_spoof_level : MinimumFeatureLevel;
+
         LOG_HOOK("[COMPAT] Intercepting device creation: MinimumFeatureLevel " +
                  Logger::FeatureLevelToString(MinimumFeatureLevel) + " -> " +
-                 Logger::FeatureLevelToString(policy.creation_level) +
-                 " (Target Spoofed Level: " + Logger::FeatureLevelToString(policy.target_spoof_level) + ")");
+                 Logger::FeatureLevelToString(creationLevel) +
+                 " (Target Spoofed Level: " + Logger::FeatureLevelToString(spoofLevel) + ")");
 
         // If ppDevice is null, caller only tests if device creation would succeed
         if (!ppDevice) {
-            HRESULT hrProbe = loader.RealD3D12CreateDevice(pAdapter, policy.creation_level, riid, nullptr);
+            HRESULT hrProbe = loader.RealD3D12CreateDevice(pAdapter, creationLevel, riid, nullptr);
             LOG_HOOK("Returned HRESULT (Probe): " + Logger::HResultToString(hrProbe));
             LOG_HOOK("============================================");
             return hrProbe;
@@ -218,7 +225,7 @@ HRESULT WINAPI D3D12CreateDevice(
 
         // Create the underlying real hardware device at native capability level
         ID3D12Device* pRealDevice = nullptr;
-        HRESULT hr = loader.RealD3D12CreateDevice(pAdapter, policy.creation_level, __uuidof(ID3D12Device), reinterpret_cast<void**>(&pRealDevice));
+        HRESULT hr = loader.RealD3D12CreateDevice(pAdapter, creationLevel, __uuidof(ID3D12Device), reinterpret_cast<void**>(&pRealDevice));
         LOG_HOOK("Returned HRESULT (Native Real): " + Logger::HResultToString(hr));
 
         if (FAILED(hr) || !pRealDevice) {
@@ -230,7 +237,7 @@ HRESULT WINAPI D3D12CreateDevice(
 
         // Wrap the real device in our ABI-safe COM compatibility wrapper
         void* pWrapped = nullptr;
-        HRESULT hrWrap = compat.WrapDevice(pRealDevice, policy.target_spoof_level, riid, &pWrapped);
+        HRESULT hrWrap = compat.WrapDevice(pRealDevice, spoofLevel, riid, &pWrapped);
         pRealDevice->Release(); // WrapDevice holds internal reference; release the creation ref
 
         if (SUCCEEDED(hrWrap) && pWrapped) {
