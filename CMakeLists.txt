@@ -15,6 +15,7 @@ set(SOURCES
     src/logger.cpp
     src/config.cpp
     src/proxy_loader.cpp
+    src/feature_level_compat.cpp
 )
 
 set(DEF_FILE "${CMAKE_CURRENT_SOURCE_DIR}/src/exports.def")

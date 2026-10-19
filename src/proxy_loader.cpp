@@ -1,4 +1,5 @@
 #include "core/proxy_loader.h"
+#include "core/feature_level_compat.h"
 #include "core/logger.h"
 #include "core/config.h"
 
@@ -17,6 +18,11 @@ ProxyLoader::~ProxyLoader() {
 }
 
 bool ProxyLoader::Initialize(HMODULE ourModule) {
+    std::lock_guard<std::mutex> lock(m_initMutex);
+    if (m_initialized) {
+        return true;
+    }
+
     m_ourModule = ourModule;
 
     wchar_t systemDir[MAX_PATH] = { 0 };
@@ -45,6 +51,7 @@ bool ProxyLoader::Initialize(HMODULE ourModule) {
     std::string pathNarrow(d3d12Path.begin(), d3d12Path.end());
     LOG_INFO("Loaded real system D3D12 library: " + pathNarrow);
 
+    // Standard D3D12 exports
     RealD3D12CreateDevice = reinterpret_cast<PFN_D3D12CreateDevice>(
         GetProcAddress(m_hRealD3D12, "D3D12CreateDevice"));
     RealD3D12GetDebugInterface = reinterpret_cast<PFN_D3D12GetDebugInterface>(
@@ -62,20 +69,52 @@ bool ProxyLoader::Initialize(HMODULE ourModule) {
     RealD3D12EnableExperimentalFeatures = reinterpret_cast<PFN_D3D12EnableExperimentalFeatures>(
         GetProcAddress(m_hRealD3D12, "D3D12EnableExperimentalFeatures"));
 
+    // Extended system / Agility SDK exports
+    RealD3D12CoreCreateLayeredDevice = reinterpret_cast<PFN_D3D12CoreCreateLayeredDevice>(
+        GetProcAddress(m_hRealD3D12, "D3D12CoreCreateLayeredDevice"));
+    RealD3D12CoreGetLayeredDeviceSize = reinterpret_cast<PFN_D3D12CoreGetLayeredDeviceSize>(
+        GetProcAddress(m_hRealD3D12, "D3D12CoreGetLayeredDeviceSize"));
+    RealD3D12CoreRegisterLayers = reinterpret_cast<PFN_D3D12CoreRegisterLayers>(
+        GetProcAddress(m_hRealD3D12, "D3D12CoreRegisterLayers"));
+    RealD3D12DeviceRemovedExtendedData = reinterpret_cast<PFN_D3D12DeviceRemovedExtendedData>(
+        GetProcAddress(m_hRealD3D12, "D3D12DeviceRemovedExtendedData"));
+    RealD3D12PIXEventsReplaceBlock = reinterpret_cast<PFN_D3D12PIXEventsReplaceBlock>(
+        GetProcAddress(m_hRealD3D12, "D3D12PIXEventsReplaceBlock"));
+    RealD3D12PIXGetThreadInfo = reinterpret_cast<PFN_D3D12PIXGetThreadInfo>(
+        GetProcAddress(m_hRealD3D12, "D3D12PIXGetThreadInfo"));
+    RealD3D12PIXNotifyWakeFromFenceSignal = reinterpret_cast<PFN_D3D12PIXNotifyWakeFromFenceSignal>(
+        GetProcAddress(m_hRealD3D12, "D3D12PIXNotifyWakeFromFenceSignal"));
+    RealD3D12PIXReportCounter = reinterpret_cast<PFN_D3D12PIXReportCounter>(
+        GetProcAddress(m_hRealD3D12, "D3D12PIXReportCounter"));
+    RealGetBehaviorValue = reinterpret_cast<PFN_GetBehaviorValue>(
+        GetProcAddress(m_hRealD3D12, "GetBehaviorValue"));
+    RealSetAppCompatStringPointer = reinterpret_cast<PFN_SetAppCompatStringPointer>(
+        GetProcAddress(m_hRealD3D12, "SetAppCompatStringPointer"));
+
     if (!RealD3D12CreateDevice) {
-        LOG_ERROR("Failed to resolve D3D12CreateDevice procedure address!");
+        LOG_ERROR("Failed to resolve critical entry point: D3D12CreateDevice!");
         return false;
     }
 
-    LOG_INFO("Successfully bound all real D3D12 entry points.");
+    m_initialized = true;
+    LOG_INFO("Successfully bound real System32 D3D12 entry points.");
     return true;
 }
 
+bool ProxyLoader::EnsureInitialized() {
+    if (m_initialized) {
+        return true;
+    }
+    return Initialize(nullptr);
+}
+
 void ProxyLoader::Shutdown() {
+    std::lock_guard<std::mutex> lock(m_initMutex);
     if (m_hRealD3D12) {
         FreeLibrary(m_hRealD3D12);
         m_hRealD3D12 = nullptr;
     }
+    m_initialized = false;
     RealD3D12CreateDevice = nullptr;
     RealD3D12GetDebugInterface = nullptr;
     RealD3D12SerializeRootSignature = nullptr;
@@ -84,6 +123,16 @@ void ProxyLoader::Shutdown() {
     RealD3D12CreateVersionedRootSignatureDeserializer = nullptr;
     RealD3D12GetInterface = nullptr;
     RealD3D12EnableExperimentalFeatures = nullptr;
+    RealD3D12CoreCreateLayeredDevice = nullptr;
+    RealD3D12CoreGetLayeredDeviceSize = nullptr;
+    RealD3D12CoreRegisterLayers = nullptr;
+    RealD3D12DeviceRemovedExtendedData = nullptr;
+    RealD3D12PIXEventsReplaceBlock = nullptr;
+    RealD3D12PIXGetThreadInfo = nullptr;
+    RealD3D12PIXNotifyWakeFromFenceSignal = nullptr;
+    RealD3D12PIXReportCounter = nullptr;
+    RealGetBehaviorValue = nullptr;
+    RealSetAppCompatStringPointer = nullptr;
 }
 
 } // namespace kepler
@@ -102,9 +151,15 @@ HRESULT WINAPI D3D12CreateDevice(
 {
     using namespace kepler;
 
+    auto& loader = ProxyLoader::Instance();
+    if (!loader.EnsureInitialized() || !loader.RealD3D12CreateDevice) {
+        LOG_ERROR("CRITICAL: Real D3D12CreateDevice pointer is null!");
+        return E_FAIL;
+    }
+
     LOG_HOOK("=== [HOOK] D3D12CreateDevice Intercepted ===");
 
-    // Adapter Inspection
+    // Inspect Adapter
     if (pAdapter != nullptr) {
         IDXGIAdapter* pDXGIAdapter = nullptr;
         HRESULT hrQI = pAdapter->QueryInterface(__uuidof(IDXGIAdapter), reinterpret_cast<void**>(&pDXGIAdapter));
@@ -134,27 +189,47 @@ HRESULT WINAPI D3D12CreateDevice(
         LOG_HOOK("Adapter: nullptr (Default DXGI Adapter)");
     }
 
-    // Log Requested Configuration
     LOG_HOOK("Requested MinimumFeatureLevel: " + Logger::FeatureLevelToString(MinimumFeatureLevel));
     LOG_HOOK("Requested REFIID: " + Logger::GuidToString(riid));
 
-    // Forward to Real System32 D3D12
-    auto& loader = ProxyLoader::Instance();
-    if (!loader.RealD3D12CreateDevice) {
-        LOG_ERROR("CRITICAL: Real D3D12CreateDevice pointer is null!");
-        return E_FAIL;
+    // Phase 2: Feature Level Compatibility Engine Policy Evaluation
+    auto& compat = FeatureLevelCompat::Instance();
+    D3D_FEATURE_LEVEL nativeMaxLevel = compat.DetectNativeMaxFeatureLevel(pAdapter);
+    auto policy = compat.EvaluatePolicy(
+        Config::Instance().IsFeatureLevelSpoofEnabled(),
+        Config::Instance().GetTargetFeatureLevel(),
+        nativeMaxLevel,
+        MinimumFeatureLevel);
+
+    LOG_INFO("[COMPAT] Policy Evaluation: " + policy.reason);
+    if (policy.should_intercept) {
+        LOG_HOOK("[COMPAT] Modifying device creation target: MinimumFeatureLevel " +
+                 Logger::FeatureLevelToString(MinimumFeatureLevel) + " -> " +
+                 Logger::FeatureLevelToString(policy.creation_level) +
+                 " (Target Spoofed Level: " + Logger::FeatureLevelToString(policy.target_spoof_level) + ")");
     }
 
-    HRESULT hr = loader.RealD3D12CreateDevice(pAdapter, MinimumFeatureLevel, riid, ppDevice);
+    // Call Real System32 D3D12CreateDevice using policy-directed level
+    HRESULT hr = loader.RealD3D12CreateDevice(pAdapter, policy.creation_level, riid, ppDevice);
 
-    // Telemetry and Diagnostics
     LOG_HOOK("Returned HRESULT: " + Logger::HResultToString(hr));
 
     if (FAILED(hr)) {
-        LOG_DIAGNOSTIC("[DIAGNOSTIC] Hardware rejected MinimumFeatureLevel! This is the exact lock Phase 2 will spoof.");
+        LOG_DIAGNOSTIC("[DIAGNOSTIC] Hardware rejected device creation! Return code: " + Logger::HResultToString(hr));
     } else {
         LOG_INFO("Real D3D12CreateDevice succeeded. Device pointer: " +
                  (ppDevice && *ppDevice ? std::string("Non-null") : std::string("null")));
+
+        // If compatibility spoofing was active and device succeeded, attach compatibility vtable hook
+        if (policy.should_intercept && ppDevice && *ppDevice) {
+            bool hooked = compat.InstallDeviceHooks(
+                reinterpret_cast<ID3D12Device*>(*ppDevice), policy.target_spoof_level);
+            if (hooked) {
+                LOG_HOOK("[COMPAT] Compatibility engine successfully attached to created ID3D12Device.");
+            } else {
+                LOG_WARN("[COMPAT] Failed to attach compatibility engine hooks to created device.");
+            }
+        }
     }
 
     LOG_HOOK("============================================");
@@ -163,21 +238,14 @@ HRESULT WINAPI D3D12CreateDevice(
 
 HRESULT WINAPI D3D12GetDebugInterface(REFIID riid, void** ppvDebug) {
     using namespace kepler;
+    auto& loader = ProxyLoader::Instance();
+    if (!loader.EnsureInitialized() || !loader.RealD3D12GetDebugInterface) {
+        return E_FAIL;
+    }
     if (Config::Instance().IsVerboseCallsEnabled()) {
         LOG_HOOK("D3D12GetDebugInterface called (riid: " + Logger::GuidToString(riid) + ")");
     }
-
-    auto& loader = ProxyLoader::Instance();
-    if (!loader.RealD3D12GetDebugInterface) {
-        LOG_ERROR("Real D3D12GetDebugInterface pointer is null!");
-        return E_FAIL;
-    }
-
-    HRESULT hr = loader.RealD3D12GetDebugInterface(riid, ppvDebug);
-    if (Config::Instance().IsVerboseCallsEnabled()) {
-        LOG_HOOK("D3D12GetDebugInterface returned: " + Logger::HResultToString(hr));
-    }
-    return hr;
+    return loader.RealD3D12GetDebugInterface(riid, ppvDebug);
 }
 
 HRESULT WINAPI D3D12SerializeRootSignature(
@@ -187,21 +255,14 @@ HRESULT WINAPI D3D12SerializeRootSignature(
     ID3DBlob** ppErrorBlob)
 {
     using namespace kepler;
+    auto& loader = ProxyLoader::Instance();
+    if (!loader.EnsureInitialized() || !loader.RealD3D12SerializeRootSignature) {
+        return E_FAIL;
+    }
     if (Config::Instance().IsVerboseCallsEnabled()) {
         LOG_HOOK("D3D12SerializeRootSignature called (Version=" + std::to_string(Version) + ")");
     }
-
-    auto& loader = ProxyLoader::Instance();
-    if (!loader.RealD3D12SerializeRootSignature) {
-        LOG_ERROR("Real D3D12SerializeRootSignature pointer is null!");
-        return E_FAIL;
-    }
-
-    HRESULT hr = loader.RealD3D12SerializeRootSignature(pRootSignature, Version, ppBlob, ppErrorBlob);
-    if (Config::Instance().IsVerboseCallsEnabled()) {
-        LOG_HOOK("D3D12SerializeRootSignature returned: " + Logger::HResultToString(hr));
-    }
-    return hr;
+    return loader.RealD3D12SerializeRootSignature(pRootSignature, Version, ppBlob, ppErrorBlob);
 }
 
 HRESULT WINAPI D3D12CreateRootSignatureDeserializer(
@@ -211,24 +272,15 @@ HRESULT WINAPI D3D12CreateRootSignatureDeserializer(
     void** ppvRootSignatureDeserializer)
 {
     using namespace kepler;
-    if (Config::Instance().IsVerboseCallsEnabled()) {
-        LOG_HOOK("D3D12CreateRootSignatureDeserializer called (riid: " +
-                 Logger::GuidToString(pRootSignatureDeserializerInterface) +
-                 ", size: " + std::to_string(SrcDataSizeInBytes) + " bytes)");
-    }
-
     auto& loader = ProxyLoader::Instance();
-    if (!loader.RealD3D12CreateRootSignatureDeserializer) {
-        LOG_ERROR("Real D3D12CreateRootSignatureDeserializer pointer is null!");
+    if (!loader.EnsureInitialized() || !loader.RealD3D12CreateRootSignatureDeserializer) {
         return E_FAIL;
     }
-
-    HRESULT hr = loader.RealD3D12CreateRootSignatureDeserializer(
-        pSrcData, SrcDataSizeInBytes, pRootSignatureDeserializerInterface, ppvRootSignatureDeserializer);
     if (Config::Instance().IsVerboseCallsEnabled()) {
-        LOG_HOOK("D3D12CreateRootSignatureDeserializer returned: " + Logger::HResultToString(hr));
+        LOG_HOOK("D3D12CreateRootSignatureDeserializer called");
     }
-    return hr;
+    return loader.RealD3D12CreateRootSignatureDeserializer(
+        pSrcData, SrcDataSizeInBytes, pRootSignatureDeserializerInterface, ppvRootSignatureDeserializer);
 }
 
 HRESULT WINAPI D3D12SerializeVersionedRootSignature(
@@ -237,21 +289,14 @@ HRESULT WINAPI D3D12SerializeVersionedRootSignature(
     ID3DBlob** ppErrorBlob)
 {
     using namespace kepler;
+    auto& loader = ProxyLoader::Instance();
+    if (!loader.EnsureInitialized() || !loader.RealD3D12SerializeVersionedRootSignature) {
+        return E_FAIL;
+    }
     if (Config::Instance().IsVerboseCallsEnabled()) {
         LOG_HOOK("D3D12SerializeVersionedRootSignature called");
     }
-
-    auto& loader = ProxyLoader::Instance();
-    if (!loader.RealD3D12SerializeVersionedRootSignature) {
-        LOG_ERROR("Real D3D12SerializeVersionedRootSignature pointer is null!");
-        return E_FAIL;
-    }
-
-    HRESULT hr = loader.RealD3D12SerializeVersionedRootSignature(pRootSignatureDesc, ppBlob, ppErrorBlob);
-    if (Config::Instance().IsVerboseCallsEnabled()) {
-        LOG_HOOK("D3D12SerializeVersionedRootSignature returned: " + Logger::HResultToString(hr));
-    }
-    return hr;
+    return loader.RealD3D12SerializeVersionedRootSignature(pRootSignatureDesc, ppBlob, ppErrorBlob);
 }
 
 HRESULT WINAPI D3D12CreateVersionedRootSignatureDeserializer(
@@ -261,44 +306,27 @@ HRESULT WINAPI D3D12CreateVersionedRootSignatureDeserializer(
     void** ppvRootSignatureDeserializer)
 {
     using namespace kepler;
-    if (Config::Instance().IsVerboseCallsEnabled()) {
-        LOG_HOOK("D3D12CreateVersionedRootSignatureDeserializer called (riid: " +
-                 Logger::GuidToString(pRootSignatureDeserializerInterface) +
-                 ", size: " + std::to_string(SrcDataSizeInBytes) + " bytes)");
-    }
-
     auto& loader = ProxyLoader::Instance();
-    if (!loader.RealD3D12CreateVersionedRootSignatureDeserializer) {
-        LOG_ERROR("Real D3D12CreateVersionedRootSignatureDeserializer pointer is null!");
+    if (!loader.EnsureInitialized() || !loader.RealD3D12CreateVersionedRootSignatureDeserializer) {
         return E_FAIL;
     }
-
-    HRESULT hr = loader.RealD3D12CreateVersionedRootSignatureDeserializer(
-        pSrcData, SrcDataSizeInBytes, pRootSignatureDeserializerInterface, ppvRootSignatureDeserializer);
     if (Config::Instance().IsVerboseCallsEnabled()) {
-        LOG_HOOK("D3D12CreateVersionedRootSignatureDeserializer returned: " + Logger::HResultToString(hr));
+        LOG_HOOK("D3D12CreateVersionedRootSignatureDeserializer called");
     }
-    return hr;
+    return loader.RealD3D12CreateVersionedRootSignatureDeserializer(
+        pSrcData, SrcDataSizeInBytes, pRootSignatureDeserializerInterface, ppvRootSignatureDeserializer);
 }
 
 HRESULT WINAPI D3D12GetInterface(REFCLSID rclsid, REFIID riid, void** ppvInterface) {
     using namespace kepler;
-    if (Config::Instance().IsVerboseCallsEnabled()) {
-        LOG_HOOK("D3D12GetInterface called (rclsid: " + Logger::GuidToString(rclsid) +
-                 ", riid: " + Logger::GuidToString(riid) + ")");
-    }
-
     auto& loader = ProxyLoader::Instance();
-    if (!loader.RealD3D12GetInterface) {
-        LOG_ERROR("Real D3D12GetInterface pointer is null!");
+    if (!loader.EnsureInitialized() || !loader.RealD3D12GetInterface) {
         return E_FAIL;
     }
-
-    HRESULT hr = loader.RealD3D12GetInterface(rclsid, riid, ppvInterface);
     if (Config::Instance().IsVerboseCallsEnabled()) {
-        LOG_HOOK("D3D12GetInterface returned: " + Logger::HResultToString(hr));
+        LOG_HOOK("D3D12GetInterface called");
     }
-    return hr;
+    return loader.RealD3D12GetInterface(rclsid, riid, ppvInterface);
 }
 
 HRESULT WINAPI D3D12EnableExperimentalFeatures(
@@ -308,18 +336,94 @@ HRESULT WINAPI D3D12EnableExperimentalFeatures(
     UINT* pConfigurationStructSizes)
 {
     using namespace kepler;
-    LOG_HOOK("D3D12EnableExperimentalFeatures called (NumFeatures=" + std::to_string(NumFeatures) + ")");
-
     auto& loader = ProxyLoader::Instance();
-    if (!loader.RealD3D12EnableExperimentalFeatures) {
-        LOG_ERROR("Real D3D12EnableExperimentalFeatures pointer is null!");
+    if (!loader.EnsureInitialized() || !loader.RealD3D12EnableExperimentalFeatures) {
         return E_FAIL;
     }
-
-    HRESULT hr = loader.RealD3D12EnableExperimentalFeatures(
+    LOG_HOOK("D3D12EnableExperimentalFeatures called (NumFeatures=" + std::to_string(NumFeatures) + ")");
+    return loader.RealD3D12EnableExperimentalFeatures(
         NumFeatures, pIIDs, pConfigurationStructs, pConfigurationStructSizes);
-    LOG_HOOK("D3D12EnableExperimentalFeatures returned: " + Logger::HResultToString(hr));
-    return hr;
+}
+
+// ============================================================================
+// Extended Windows 11 / Agility SDK Exports Forwarding
+// ============================================================================
+
+HRESULT WINAPI D3D12CoreCreateLayeredDevice(const void* a, const void* b, REFIID riid, void** ppv) {
+    auto& loader = kepler::ProxyLoader::Instance();
+    if (!loader.EnsureInitialized() || !loader.RealD3D12CoreCreateLayeredDevice) {
+        return E_NOTIMPL;
+    }
+    return loader.RealD3D12CoreCreateLayeredDevice(a, b, riid, ppv);
+}
+
+SIZE_T WINAPI D3D12CoreGetLayeredDeviceSize(const void* a, const void* b) {
+    auto& loader = kepler::ProxyLoader::Instance();
+    if (!loader.EnsureInitialized() || !loader.RealD3D12CoreGetLayeredDeviceSize) {
+        return 0;
+    }
+    return loader.RealD3D12CoreGetLayeredDeviceSize(a, b);
+}
+
+HRESULT WINAPI D3D12CoreRegisterLayers(const void* a, const void* b) {
+    auto& loader = kepler::ProxyLoader::Instance();
+    if (!loader.EnsureInitialized() || !loader.RealD3D12CoreRegisterLayers) {
+        return E_NOTIMPL;
+    }
+    return loader.RealD3D12CoreRegisterLayers(a, b);
+}
+
+HRESULT WINAPI D3D12DeviceRemovedExtendedData(void* pData) {
+    auto& loader = kepler::ProxyLoader::Instance();
+    if (!loader.EnsureInitialized() || !loader.RealD3D12DeviceRemovedExtendedData) {
+        return E_NOTIMPL;
+    }
+    return loader.RealD3D12DeviceRemovedExtendedData(pData);
+}
+
+void WINAPI D3D12PIXEventsReplaceBlock(void* pBlock) {
+    auto& loader = kepler::ProxyLoader::Instance();
+    if (loader.EnsureInitialized() && loader.RealD3D12PIXEventsReplaceBlock) {
+        loader.RealD3D12PIXEventsReplaceBlock(pBlock);
+    }
+}
+
+void* WINAPI D3D12PIXGetThreadInfo() {
+    auto& loader = kepler::ProxyLoader::Instance();
+    if (loader.EnsureInitialized() && loader.RealD3D12PIXGetThreadInfo) {
+        return loader.RealD3D12PIXGetThreadInfo();
+    }
+    return nullptr;
+}
+
+void WINAPI D3D12PIXNotifyWakeFromFenceSignal(void* pFence) {
+    auto& loader = kepler::ProxyLoader::Instance();
+    if (loader.EnsureInitialized() && loader.RealD3D12PIXNotifyWakeFromFenceSignal) {
+        loader.RealD3D12PIXNotifyWakeFromFenceSignal(pFence);
+    }
+}
+
+void WINAPI D3D12PIXReportCounter(void* pCounter, UINT64 value) {
+    auto& loader = kepler::ProxyLoader::Instance();
+    if (loader.EnsureInitialized() && loader.RealD3D12PIXReportCounter) {
+        loader.RealD3D12PIXReportCounter(pCounter, value);
+    }
+}
+
+UINT WINAPI GetBehaviorValue(UINT feature) {
+    auto& loader = kepler::ProxyLoader::Instance();
+    if (loader.EnsureInitialized() && loader.RealGetBehaviorValue) {
+        return loader.RealGetBehaviorValue(feature);
+    }
+    return 0;
+}
+
+HRESULT WINAPI SetAppCompatStringPointer(UINT index, PCWSTR str) {
+    auto& loader = kepler::ProxyLoader::Instance();
+    if (loader.EnsureInitialized() && loader.RealSetAppCompatStringPointer) {
+        return loader.RealSetAppCompatStringPointer(index, str);
+    }
+    return E_NOTIMPL;
 }
 
 } // extern "C"
