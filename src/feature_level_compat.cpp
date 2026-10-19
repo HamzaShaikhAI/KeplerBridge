@@ -4,6 +4,10 @@
 #include "core/config.h"
 #include "downgrader/pso_hook.h"
 #include "downgrader/texture_clamper.h"
+#include "translator/wrapped_command_objects.h"
+#include "translator/d3d11_backend.h"
+#include "translator/resource_manager.h"
+#include "translator/command_translator.h"
 
 #include <algorithm>
 #include <sstream>
@@ -96,11 +100,48 @@ UINT STDMETHODCALLTYPE WrappedD3D12Device::GetNodeCount() {
 }
 
 HRESULT STDMETHODCALLTYPE WrappedD3D12Device::CreateCommandQueue(const D3D12_COMMAND_QUEUE_DESC* pDesc, REFIID riid, void** ppCommandQueue) {
-    return m_pReal ? m_pReal->CreateCommandQueue(pDesc, riid, ppCommandQueue) : E_FAIL;
+    if (!ppCommandQueue) return E_POINTER;
+    *ppCommandQueue = nullptr;
+    if (!m_pReal) return E_FAIL;
+
+    if (Config::Instance().IsD3D11TranslationEnabled() || Config::Instance().IsStateTrackingEnabled()) {
+        if (Config::Instance().IsD3D11TranslationEnabled() && !D3D11Backend::Instance().IsInitialized()) {
+            D3D11Backend::Instance().Initialize(nullptr);
+        }
+        ID3D12CommandQueue* pRealQueue = nullptr;
+        HRESULT hr = m_pReal->CreateCommandQueue(pDesc, __uuidof(ID3D12CommandQueue), reinterpret_cast<void**>(&pRealQueue));
+        if (FAILED(hr)) return hr;
+
+        auto* wrapped = new WrappedD3D12CommandQueue(pRealQueue, pDesc);
+        if (pRealQueue) pRealQueue->Release();
+
+        HRESULT hrQI = wrapped->QueryInterface(riid, ppCommandQueue);
+        wrapped->Release();
+        return hrQI;
+    }
+
+    return m_pReal->CreateCommandQueue(pDesc, riid, ppCommandQueue);
 }
 
 HRESULT STDMETHODCALLTYPE WrappedD3D12Device::CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE type, REFIID riid, void** ppCommandAllocator) {
-    return m_pReal ? m_pReal->CreateCommandAllocator(type, riid, ppCommandAllocator) : E_FAIL;
+    if (!ppCommandAllocator) return E_POINTER;
+    *ppCommandAllocator = nullptr;
+    if (!m_pReal) return E_FAIL;
+
+    if (Config::Instance().IsD3D11TranslationEnabled() || Config::Instance().IsStateTrackingEnabled()) {
+        ID3D12CommandAllocator* pRealAlloc = nullptr;
+        HRESULT hr = m_pReal->CreateCommandAllocator(type, __uuidof(ID3D12CommandAllocator), reinterpret_cast<void**>(&pRealAlloc));
+        if (FAILED(hr)) return hr;
+
+        auto* wrapped = new WrappedD3D12CommandAllocator(pRealAlloc, type);
+        if (pRealAlloc) pRealAlloc->Release();
+
+        HRESULT hrQI = wrapped->QueryInterface(riid, ppCommandAllocator);
+        wrapped->Release();
+        return hrQI;
+    }
+
+    return m_pReal->CreateCommandAllocator(type, riid, ppCommandAllocator);
 }
 
 HRESULT STDMETHODCALLTYPE WrappedD3D12Device::CreateGraphicsPipelineState(const D3D12_GRAPHICS_PIPELINE_STATE_DESC* pDesc, REFIID riid, void** ppPipelineState) {
@@ -112,7 +153,30 @@ HRESULT STDMETHODCALLTYPE WrappedD3D12Device::CreateComputePipelineState(const D
 }
 
 HRESULT STDMETHODCALLTYPE WrappedD3D12Device::CreateCommandList(UINT nodeMask, D3D12_COMMAND_LIST_TYPE type, ID3D12CommandAllocator* pCommandAllocator, ID3D12PipelineState* pInitialState, REFIID riid, void** ppCommandList) {
-    return m_pReal ? m_pReal->CreateCommandList(nodeMask, type, pCommandAllocator, pInitialState, riid, ppCommandList) : E_FAIL;
+    if (!ppCommandList) return E_POINTER;
+    *ppCommandList = nullptr;
+    if (!m_pReal) return E_FAIL;
+
+    if (Config::Instance().IsD3D11TranslationEnabled() || Config::Instance().IsStateTrackingEnabled()) {
+        ID3D12CommandAllocator* realAlloc = pCommandAllocator;
+        auto* wrappedAlloc = dynamic_cast<WrappedD3D12CommandAllocator*>(pCommandAllocator);
+        if (wrappedAlloc && wrappedAlloc->GetReal()) {
+            realAlloc = wrappedAlloc->GetReal();
+        }
+
+        ID3D12GraphicsCommandList* pRealList = nullptr;
+        HRESULT hr = m_pReal->CreateCommandList(nodeMask, type, realAlloc, pInitialState, __uuidof(ID3D12GraphicsCommandList), reinterpret_cast<void**>(&pRealList));
+        if (FAILED(hr)) return hr;
+
+        auto* wrapped = new WrappedD3D12GraphicsCommandList(pRealList, type, pCommandAllocator);
+        if (pRealList) pRealList->Release();
+
+        HRESULT hrQI = wrapped->QueryInterface(riid, ppCommandList);
+        wrapped->Release();
+        return hrQI;
+    }
+
+    return m_pReal->CreateCommandList(nodeMask, type, pCommandAllocator, pInitialState, riid, ppCommandList);
 }
 
 HRESULT STDMETHODCALLTYPE WrappedD3D12Device::CheckFeatureSupport(D3D12_FEATURE Feature, void* pFeatureSupportData, UINT FeatureSupportDataSize) {
@@ -169,18 +233,62 @@ void STDMETHODCALLTYPE WrappedD3D12Device::CreateConstantBufferView(const D3D12_
 
 void STDMETHODCALLTYPE WrappedD3D12Device::CreateShaderResourceView(ID3D12Resource* pResource, const D3D12_SHADER_RESOURCE_VIEW_DESC* pDesc, D3D12_CPU_DESCRIPTOR_HANDLE DestDescriptor) {
     if (m_pReal) m_pReal->CreateShaderResourceView(pResource, pDesc, DestDescriptor);
+    if (Config::Instance().IsD3D11TranslationEnabled() && D3D11Backend::Instance().IsInitialized() && pResource) {
+        TranslatedResourceInfo info;
+        if (ResourceManager::Instance().GetResourceInfo(pResource, info) && info.pD3D11Resource) {
+            ID3D11ShaderResourceView* pSRV = nullptr;
+            D3D11Backend::Instance().GetDevice()->CreateShaderResourceView(info.pD3D11Resource, nullptr, &pSRV);
+            if (pSRV) {
+                ResourceManager::Instance().RegisterSRV(DestDescriptor.ptr, pSRV);
+                pSRV->Release();
+            }
+        }
+    }
 }
 
 void STDMETHODCALLTYPE WrappedD3D12Device::CreateUnorderedAccessView(ID3D12Resource* pResource, ID3D12Resource* pCounterResource, const D3D12_UNORDERED_ACCESS_VIEW_DESC* pDesc, D3D12_CPU_DESCRIPTOR_HANDLE DestDescriptor) {
     if (m_pReal) m_pReal->CreateUnorderedAccessView(pResource, pCounterResource, pDesc, DestDescriptor);
+    if (Config::Instance().IsD3D11TranslationEnabled() && D3D11Backend::Instance().IsInitialized() && pResource) {
+        TranslatedResourceInfo info;
+        if (ResourceManager::Instance().GetResourceInfo(pResource, info) && info.pD3D11Resource) {
+            ID3D11UnorderedAccessView* pUAV = nullptr;
+            D3D11Backend::Instance().GetDevice()->CreateUnorderedAccessView(info.pD3D11Resource, nullptr, &pUAV);
+            if (pUAV) {
+                ResourceManager::Instance().RegisterUAV(DestDescriptor.ptr, pUAV);
+                pUAV->Release();
+            }
+        }
+    }
 }
 
 void STDMETHODCALLTYPE WrappedD3D12Device::CreateRenderTargetView(ID3D12Resource* pResource, const D3D12_RENDER_TARGET_VIEW_DESC* pDesc, D3D12_CPU_DESCRIPTOR_HANDLE DestDescriptor) {
     if (m_pReal) m_pReal->CreateRenderTargetView(pResource, pDesc, DestDescriptor);
+    if (Config::Instance().IsD3D11TranslationEnabled() && D3D11Backend::Instance().IsInitialized() && pResource) {
+        TranslatedResourceInfo info;
+        if (ResourceManager::Instance().GetResourceInfo(pResource, info) && info.pD3D11Resource) {
+            ID3D11RenderTargetView* pRTV = nullptr;
+            D3D11Backend::Instance().GetDevice()->CreateRenderTargetView(info.pD3D11Resource, nullptr, &pRTV);
+            if (pRTV) {
+                ResourceManager::Instance().RegisterRTV(DestDescriptor.ptr, pRTV);
+                pRTV->Release();
+            }
+        }
+    }
 }
 
 void STDMETHODCALLTYPE WrappedD3D12Device::CreateDepthStencilView(ID3D12Resource* pResource, const D3D12_DEPTH_STENCIL_VIEW_DESC* pDesc, D3D12_CPU_DESCRIPTOR_HANDLE DestDescriptor) {
     if (m_pReal) m_pReal->CreateDepthStencilView(pResource, pDesc, DestDescriptor);
+    if (Config::Instance().IsD3D11TranslationEnabled() && D3D11Backend::Instance().IsInitialized() && pResource) {
+        TranslatedResourceInfo info;
+        if (ResourceManager::Instance().GetResourceInfo(pResource, info) && info.pD3D11Resource) {
+            ID3D11DepthStencilView* pDSV = nullptr;
+            D3D11Backend::Instance().GetDevice()->CreateDepthStencilView(info.pD3D11Resource, nullptr, &pDSV);
+            if (pDSV) {
+                ResourceManager::Instance().RegisterDSV(DestDescriptor.ptr, pDSV);
+                pDSV->Release();
+            }
+        }
+    }
 }
 
 void STDMETHODCALLTYPE WrappedD3D12Device::CreateSampler(const D3D12_SAMPLER_DESC* pDesc, D3D12_CPU_DESCRIPTOR_HANDLE DestDescriptor) {
@@ -210,7 +318,29 @@ HRESULT STDMETHODCALLTYPE WrappedD3D12Device::CreateCommittedResource(const D3D1
         LOG_HOOK("[RESOURCE] CreateCommittedResource: " + val.diagnostics);
     }
     const D3D12_RESOURCE_DESC* effectiveDesc = val.isModified ? &val.modifiedDesc : pDesc;
-    return m_pReal->CreateCommittedResource(pHeapProperties, HeapFlags, effectiveDesc, InitialResourceState, pOptimizedClearValue, riidResource, ppvResource);
+    HRESULT hr = m_pReal->CreateCommittedResource(pHeapProperties, HeapFlags, effectiveDesc, InitialResourceState, pOptimizedClearValue, riidResource, ppvResource);
+    if (SUCCEEDED(hr) && ppvResource && *ppvResource) {
+        auto* pRes = reinterpret_cast<ID3D12Resource*>(*ppvResource);
+        ResourceStateTracker::Instance().RegisterResource(pRes, InitialResourceState);
+
+        if (Config::Instance().IsD3D11TranslationEnabled() && D3D11Backend::Instance().IsInitialized()) {
+            ID3D11Resource* pD3D11Res = nullptr;
+            if (effectiveDesc->Dimension == D3D12_RESOURCE_DIMENSION_BUFFER) {
+                ID3D11Buffer* pBuf = nullptr;
+                if (SUCCEEDED(D3D11Backend::Instance().CreateTranslatedBuffer(effectiveDesc, pHeapProperties, &pBuf))) {
+                    pD3D11Res = pBuf;
+                }
+            } else if (effectiveDesc->Dimension == D3D12_RESOURCE_DIMENSION_TEXTURE2D) {
+                ID3D11Texture2D* pTex = nullptr;
+                if (SUCCEEDED(D3D11Backend::Instance().CreateTranslatedTexture2D(effectiveDesc, pHeapProperties, &pTex))) {
+                    pD3D11Res = pTex;
+                }
+            }
+            ResourceManager::Instance().RegisterResource(pRes, *effectiveDesc, pHeapProperties, pD3D11Res);
+            if (pD3D11Res) pD3D11Res->Release();
+        }
+    }
+    return hr;
 }
 
 HRESULT STDMETHODCALLTYPE WrappedD3D12Device::CreateHeap(const D3D12_HEAP_DESC* pDesc, REFIID riid, void** ppvHeap) {

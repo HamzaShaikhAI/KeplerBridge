@@ -15,7 +15,7 @@ public:
     bool IsLoggingEnabled() const { return m_enableLogging; }
     bool IsVerboseCallsEnabled() const { return m_logVerboseCalls; }
 
-    // Spoof settings (Phase 2 preparation)
+    // Spoof settings
     bool IsFeatureLevelSpoofEnabled() const { return m_enableFeatureLevelSpoof; }
     const std::string& GetTargetFeatureLevel() const { return m_targetFeatureLevel; }
     uint32_t GetSpoofVRAMMB() const { return m_spoofVRAMMB; }
@@ -26,6 +26,13 @@ public:
     bool IsTextureClampingEnabled() const { return m_enableTextureClamping; }
     uint32_t GetMaxTextureResolution() const { return m_maxTextureResolution; }
     bool ShouldStripHeavyShaders() const { return m_stripHeavyShaders; }
+
+    // Translation settings (Phase 4)
+    bool IsD3D11TranslationEnabled() const { return m_enableD3D11Translation; }
+    bool IsBarrierEmulationEnabled() const { return m_emulateBarriers; }
+    bool IsStateTrackingEnabled() const { return m_enableStateTracking; }
+    bool IsImmediateQueueFlushEnabled() const { return m_immediateQueueFlush; }
+    bool IsQueryEmulationEnabled() const { return m_emulateQueries; }
 
     void LogSettings() const;
 
@@ -47,6 +54,13 @@ private:
     bool m_enableTextureClamping = false;
     uint32_t m_maxTextureResolution = 512;
     bool m_stripHeavyShaders = false;
+
+    // Translation settings
+    bool m_enableD3D11Translation = false;
+    bool m_emulateBarriers = true;
+    bool m_enableStateTracking = true;
+    bool m_immediateQueueFlush = true;
+    bool m_emulateQueries = true;
 
     std::string m_configFilePath;
 };

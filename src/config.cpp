@@ -41,6 +41,13 @@ bool Config::Load(const std::string& iniFilePath) {
     m_maxTextureResolution = static_cast<uint32_t>(GetPrivateProfileIntA("Downgrader", "MaxTextureResolution", 512, iniFilePath.c_str()));
     m_stripHeavyShaders = GetPrivateProfileIntA("Downgrader", "StripHeavyShaders", 0, iniFilePath.c_str()) != 0;
 
+    // [Translation]
+    m_enableD3D11Translation = GetPrivateProfileIntA("Translation", "EnableD3D11Translation", 0, iniFilePath.c_str()) != 0;
+    m_emulateBarriers = GetPrivateProfileIntA("Translation", "EmulateBarriers", 1, iniFilePath.c_str()) != 0;
+    m_enableStateTracking = GetPrivateProfileIntA("Translation", "EnableStateTracking", 1, iniFilePath.c_str()) != 0;
+    m_immediateQueueFlush = GetPrivateProfileIntA("Translation", "ImmediateQueueFlush", 1, iniFilePath.c_str()) != 0;
+    m_emulateQueries = GetPrivateProfileIntA("Translation", "EmulateQueries", 1, iniFilePath.c_str()) != 0;
+
     LOG_INFO("Successfully loaded configuration from: " + iniFilePath);
     return true;
 }
@@ -57,6 +64,11 @@ void Config::LogSettings() const {
     LOG_INFO("  [Downgrader] EnableTextureClamping: " + std::string(m_enableTextureClamping ? "true" : "false"));
     LOG_INFO("  [Downgrader] MaxTextureResolution: " + std::to_string(m_maxTextureResolution));
     LOG_INFO("  [Downgrader] StripHeavyShaders: " + std::string(m_stripHeavyShaders ? "true" : "false"));
+    LOG_INFO("  [Translation] EnableD3D11Translation: " + std::string(m_enableD3D11Translation ? "true" : "false"));
+    LOG_INFO("  [Translation] EmulateBarriers: " + std::string(m_emulateBarriers ? "true" : "false"));
+    LOG_INFO("  [Translation] EnableStateTracking: " + std::string(m_enableStateTracking ? "true" : "false"));
+    LOG_INFO("  [Translation] ImmediateQueueFlush: " + std::string(m_immediateQueueFlush ? "true" : "false"));
+    LOG_INFO("  [Translation] EmulateQueries: " + std::string(m_emulateQueries ? "true" : "false"));
     LOG_INFO("----------------------------------");
 }
 

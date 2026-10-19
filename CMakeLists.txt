@@ -19,6 +19,10 @@ set(CORE_SOURCES
     src/shader_policy.cpp
     src/texture_clamper.cpp
     src/pso_hook.cpp
+    src/command_translator.cpp
+    src/resource_manager.cpp
+    src/d3d11_backend.cpp
+    src/wrapped_command_objects.cpp
 )
 
 set(SOURCES
@@ -41,11 +45,12 @@ set_target_properties(d3d12 PROPERTIES
     OUTPUT_NAME "d3d12"
 )
 
-# Link against standard Windows libraries: dxgi, dxguid, user32
+# Link against standard Windows libraries: dxgi, dxguid, user32, d3d11
 target_link_libraries(d3d12 PRIVATE
     dxgi
     dxguid
     user32
+    d3d11
 )
 
 # Configure module definition file and ensure standalone static runtime
@@ -76,7 +81,7 @@ add_executable(test_policy_engine
     ${CORE_SOURCES}
 )
 target_include_directories(test_policy_engine PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
-target_link_libraries(test_policy_engine PRIVATE dxgi dxguid user32)
+target_link_libraries(test_policy_engine PRIVATE dxgi dxguid user32 d3d11)
 if(NOT MSVC)
     target_link_options(test_policy_engine PRIVATE -static -static-libgcc -static-libstdc++)
 endif()
@@ -96,12 +101,27 @@ if(NOT MSVC)
     target_link_options(test_shader_inspector PRIVATE -static -static-libgcc -static-libstdc++)
 endif()
 
+# Unit Test: Phase 4 Translation Engine
+add_executable(test_translation_engine
+    tests/test_translation_engine.cpp
+    src/command_translator.cpp
+    src/resource_manager.cpp
+    src/d3d11_backend.cpp
+    src/config.cpp
+    src/logger.cpp
+)
+target_include_directories(test_translation_engine PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+target_link_libraries(test_translation_engine PRIVATE dxgi dxguid user32 d3d11)
+if(NOT MSVC)
+    target_link_options(test_translation_engine PRIVATE -static -static-libgcc -static-libstdc++)
+endif()
+
 # Integration Test: Live Hardware D3D12 Feature Level Compatibility
 add_executable(test_d3d12_compat
     tests/test_d3d12_compat.cpp
 )
 target_include_directories(test_d3d12_compat PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
-target_link_libraries(test_d3d12_compat PRIVATE dxgi dxguid user32)
+target_link_libraries(test_d3d12_compat PRIVATE dxgi dxguid user32 d3d11)
 if(NOT MSVC)
     target_link_options(test_d3d12_compat PRIVATE -static -static-libgcc -static-libstdc++)
 endif()
@@ -111,9 +131,19 @@ add_executable(test_pso_interception
     tests/test_pso_interception.cpp
 )
 target_include_directories(test_pso_interception PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
-target_link_libraries(test_pso_interception PRIVATE dxgi dxguid user32)
+target_link_libraries(test_pso_interception PRIVATE dxgi dxguid user32 d3d11)
 if(NOT MSVC)
     target_link_options(test_pso_interception PRIVATE -static -static-libgcc -static-libstdc++)
+endif()
+
+# Integration Test: Live Hardware Phase 4 Translation & Execution
+add_executable(test_d3d12_translation
+    tests/test_d3d12_translation.cpp
+)
+target_include_directories(test_d3d12_translation PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+target_link_libraries(test_d3d12_translation PRIVATE dxgi dxguid user32 d3d11)
+if(NOT MSVC)
+    target_link_options(test_d3d12_translation PRIVATE -static -static-libgcc -static-libstdc++)
 endif()
 
 # Legacy Phase 1 Test
