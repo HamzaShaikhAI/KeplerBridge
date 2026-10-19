@@ -1,0 +1,5 @@
+build/
+audit_build/
+*.log
+*.tmp
+.vs/
