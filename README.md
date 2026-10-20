@@ -81,22 +81,16 @@ KeplerBridge assesses PC titles for theoretical and technical feasibility under 
 
 ---
 
-## 4. Installation & Quick Start
+## 4. Installation & Configuration
 
-1. **Download:** Get the latest pre-release archive (`keplerbridge-v0.8.0-rc1-x64.zip`) from [GitHub Releases](https://github.com/HamzaShaikhAI/KeplerBridge/releases).
-2. **Deploy:** Extract `d3d12.dll` and `kepler_bridge.ini` into the directory containing your target 64-bit game executable (alongside the `.exe`).
-3. **Launch:** Start the game in offline mode. KeplerBridge initializes automatically.
-4. **Verify:** Check `kepler_bridge.log` in the game directory to confirm capability negotiation and proxy operation.
+1. **Download:** Get the latest release package (`keplerbridge-v0.8.0-rc1-x64.zip`) from [GitHub Releases](https://github.com/HamzaShaikhAI/KeplerBridge/releases).
+2. **Deploy:** Extract `d3d12.dll` and `kepler_bridge.ini` into the game directory containing the main 64-bit executable.
+3. **Launch:** Run the game in offline mode. KeplerBridge initializes automatically and creates a `kepler_bridge.log` diagnostic file.
 
-### Uninstallation
-To remove KeplerBridge, delete `d3d12.dll`, `kepler_bridge.ini`, `kepler_bridge.log`, and the `kepler_cache/` folder from the game directory. The application immediately reverts to the default Windows D3D12 runtime.
+For detailed folder locations, engine-specific tips, and uninstallation steps, see the full [`docs/INSTALLATION.md`](docs/INSTALLATION.md) guide.
 
-### Configuration (`kepler_bridge.ini`)
+### Key Configuration Options (`kepler_bridge.ini`)
 ```ini
-[General]
-EnableLogging=1            ; Set to 0 to eliminate logging overhead during gameplay
-LogVerboseCalls=0          ; Set to 1 only for debugging API failures
-
 [Spoof]
 EnableFeatureLevelSpoof=1 ; Allows passing D3D12 12_0 startup checks
 TargetFeatureLevel=12_0
@@ -146,21 +140,25 @@ flowchart TD
     D3D11Runtime -->|"WDDM Driver"| Hardware["Kepler GPU (Feature Level 11_0)"]
 ```
 
-1. **API Interception:** The proxy exports all standard `d3d12.dll` entry points, capturing device creation requests.
+1. **API Interception:** Exports all standard `d3d12.dll` entry points, capturing device creation calls.
 2. **Device Wrapping:** An authentic native hardware device is initialized under Feature Level 11_0 and presented to the game wrapped in `WrappedD3D12Device`.
 3. **Command Batching & Replay:** Direct3D 12 command lists record draw, dispatch, and state commands into contiguous buffers. Upon queue submission, KeplerBridge serializes and replays the commands onto the Direct3D 11 immediate device context.
 4. **Shader Translation & Caching:** Shaders are inspected, translated if required, and cached to disk. Subsequent launches load pre-translated DXBC bytecode directly, bypassing compiler latency.
 5. **GPU Synchronization:** Fences synchronize CPU and GPU workloads using native `D3D11_QUERY_EVENT` queries, ensuring GPU completion before advancing CPU wait conditions.
 
+For a comprehensive technical breakdown of all subsystems, see [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
+
 ---
 
 ## 6. Performance Expectations & Hardware Guidance
 
-Performance on legacy hardware is largely determined by **memory bandwidth** and **CPU single-thread throughput**. For comprehensive tuning advice, consult the [`docs/PERFORMANCE_GUIDE.md`](docs/PERFORMANCE_GUIDE.md).
+Performance on legacy hardware is governed primarily by **memory bandwidth** and **CPU single-thread throughput**.
 
 * **Resolution Recommendation:** 1280x720 (720p) or 1366x768 is strongly recommended for DDR3-based cards.
 * **Upscaling:** Utilizing in-game dynamic resolution scaling, AMD FSR, or Unreal Engine TSR (50%–70%) substantially reduces memory bus saturation.
-* **Texture Clamping:** Enabling `EnableTextureClamping=1` in `kepler_bridge.ini` prevents 4K textures from overwhelming 64-bit memory buses (14.4 GB/s on GT 740 DDR3).
+* **Texture Clamping:** Setting `EnableTextureClamping=1` in `kepler_bridge.ini` prevents 4K textures from overwhelming 64-bit memory buses (14.4 GB/s on GT 740 DDR3).
+
+For configuration benchmarks across representative hardware tiers and in-game optimization tips, consult [`docs/PERFORMANCE_GUIDE.md`](docs/PERFORMANCE_GUIDE.md).
 
 ---
 
@@ -174,9 +172,11 @@ Performance on legacy hardware is largely determined by **memory bandwidth** and
 | **Black screen with audio playing** | Swapchain format or presentation mismatch | KeplerBridge automatically applies `DXGI_SWAP_EFFECT_DISCARD`. Update GPU driver to 456.71. |
 | **DirectX 12 feature level error** | Game requires Feature Level 12_0 startup check | Confirm `EnableFeatureLevelSpoof=1` and `TargetFeatureLevel=12_0` in `kepler_bridge.ini`. |
 
+For diagnostic log interpretation and error codes (`KB_ERR_*`), consult [`docs/TROUBLESHOOTING.md`](docs/TROUBLESHOOTING.md).
+
 ---
 
-## 8. Feature Support & Hardware Boundaries
+## 8. Feature Support & Known Limitations
 
 KeplerBridge translates compatible Direct3D 12 operations into Direct3D 11. It does not fabricate missing physical silicon hardware features:
 
@@ -189,21 +189,25 @@ KeplerBridge translates compatible Direct3D 12 operations into Direct3D 11. It d
 | **Presentation** | Windowed & Borderless Discard Swapchains, Tearing Sanitization | Hardware Flip Model Tearing on legacy WDDM 2.7 |
 | **Asset Streaming** | Staged dynamic buffer uploads, texture clamping | DirectStorage GDeflate GPU Decompression |
 
-*For complete technical boundary documentation, see [`docs/KNOWN_LIMITATIONS.md`](docs/KNOWN_LIMITATIONS.md).*
+For full technical specifications on hardware boundaries, see [`docs/KNOWN_LIMITATIONS.md`](docs/KNOWN_LIMITATIONS.md).
 
 ---
 
-## 9. Development & Verification History
+## 9. Physical Game Testing Protocol
 
-KeplerBridge has been verified through a rigorous automated regression suite:
-* **Hardware Unit & Integration Proofs:** 113 / 113 automated verification proofs pass across 15 test executables directly on physical GT 740 hardware.
-* **Archived Engineering History:** Complete architectural designs, baseline audits, and milestone reports from Phases 1 through 10 are preserved under [`docs/development/archive/`](docs/development/archive/).
-* **Release Readiness & Acceptance:** Review the formal release checklist in [`docs/RELEASE_CHECKLIST.md`](docs/RELEASE_CHECKLIST.md) and [`docs/RELEASE_READINESS_REVIEW.md`](docs/RELEASE_READINESS_REVIEW.md).
+To ensure rigorous validation of commercial game titles, KeplerBridge follows a structured five-gate acceptance protocol:
+* **Gate 1:** Proxy injection and device interception.
+* **Gate 2:** D3D11 Feature Level 11_0 device and swapchain creation.
+* **Gate 3:** Interactive 3D gameplay entry (beyond intros and menus).
+* **Gate 4:** 15-minute continuous stability with 0 WDDM watchdog timeouts (`0x887A0005`).
+* **Gate 5:** Resource and memory bandwidth viability on GT 740 DDR3 (14.4 GB/s).
+
+Review the detailed acceptance criteria in [`docs/REAL_GAME_VALIDATION_PLAN.md`](docs/REAL_GAME_VALIDATION_PLAN.md).
 
 ---
 
 ## 10. Contributing, Security & Licensing
 
-* **Contributing:** Contributions, bug reports, and compatibility findings are welcome! Please read [`CONTRIBUTING.md`](CONTRIBUTING.md) and use our [Issue Templates](.github/ISSUE_TEMPLATE/).
-* **Security & Anti-Cheat:** KeplerBridge is intended strictly for offline single-player gaming and hardware preservation. Do **not** use with online multiplayer games protected by kernel anti-cheat systems. Review [`SECURITY.md`](SECURITY.md) for details.
-* **License:** KeplerBridge is released under the permissive [MIT License](LICENSE).
+* **Contributing:** Community contributions, compatibility reports, and bug fixes are welcome! Read [`CONTRIBUTING.md`](CONTRIBUTING.md) and use our [Issue Templates](.github/ISSUE_TEMPLATE/).
+* **Security & Anti-Cheat:** KeplerBridge is intended exclusively for offline single-player gaming and hardware preservation. Do **not** use with online multiplayer games protected by kernel anti-cheat systems. Review [`SECURITY.md`](SECURITY.md) for details.
+* **License:** KeplerBridge is open source under the permissive [MIT License](LICENSE).
