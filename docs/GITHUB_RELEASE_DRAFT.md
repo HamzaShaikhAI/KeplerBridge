@@ -1,4 +1,4 @@
-# KeplerBridge v0.8.0-rc1 — Release Candidate 1
+# KeplerBridge v0.8.0-rc1 — Initial Public Release Candidate
 
 > **Pre-Release Candidate:** This release candidate is published for hardware verification, community testing, and compatibility research on NVIDIA Kepler GPUs. It is not yet certified as a general stable release. Commercial games require physical acceptance testing before being marked playable.
 
@@ -32,8 +32,9 @@ Deploying as a drop-in 64-bit `d3d12.dll` alongside game executables, KeplerBrid
 KeplerBridge v0.8.0-rc1 has been verified against the physical **NVIDIA GeForce GT 740** GPU (GK208B, 4052 MB DDR3, Driver 456.71, Windows 10 x64):
 
 * **Total Test Suites:** 15 executables
-* **Total Automated Tests:** 111 / 111 Passed (100% Pass Rate)
+* **Total Automated Proofs:** 113 / 113 Passed (100% Pass Rate)
 * **Regressions:** 0 detected
+* **Important Note:** These are automated hardware unit/integration proofs exercising translation boundaries, **not** commercial game compatibility assertions.
 
 ---
 
@@ -77,12 +78,12 @@ KeplerBridge is designed exclusively for offline single-player applications, leg
 
 ---
 
-## Release Package Checksums
+## Release Package Checksums (Phase 10 Release Candidate)
 
 ```
-042565a1e018a0444b04a9a7b85376ebb942d2646f47b18d5a8dea38157a5b6a  d3d12.dll
-1162c535c35cc04d7284621bab7d52aa620ba9984545423f235a9e900e3fc054  kepler_bridge.ini
+03e685a1592844b0bcddb4e3e9a4512d88a27bc33359db7caa9546bb6867e8a8  d3d12.dll
+8b0e9ba2b9861e7524b588aafdec0acc87e7cddefc7b87cbf82ac1e03e5b3b78  kepler_bridge.ini
 2bb0f6c997569474e8d16e264f7a133218a683e68f1c62326204985aa89a93db  LICENSE
-e7c99e0000cfaef8a515235953b92182b5b64760c44a50670b6ce2e29dc14ed9  README.txt
-383be1c12d945d0c01368174ac63947f153080a12e8e261dc152acd181e23007  keplerbridge-v0.8.0-rc1-x64.zip
+7e9ad74bb7d68b5da83fc43b0a9b53534fb96b75465135eb33c6e274b45f97c9  README.txt
+745a8f367df1217dc514824f85fa088055a320bfee95e8efacdd7218ad28a076  keplerbridge-v0.8.0-rc1-x64.zip
 ```
