@@ -74,6 +74,22 @@ int main() {
     hr = pDevice->CreateCommandQueue(&queueDesc, IID_PPV_ARGS(&pCommandQueue));
     std::cout << "CreateCommandQueue returned hr = 0x" << std::hex << hr << std::dec << std::endl;
     assert(SUCCEEDED(hr) && pCommandQueue != nullptr);
+    assert(pCommandQueue->GetDevice(__uuidof(ID3D12Device), nullptr) == E_POINTER);
+    ID3D12Device* pQueueDev = nullptr;
+    HRESULT hrDev = pCommandQueue->GetDevice(IID_PPV_ARGS(&pQueueDev));
+    std::cout << "pCommandQueue->GetDevice returned hr = 0x" << std::hex << hrDev << std::dec << std::endl;
+    assert(SUCCEEDED(hrDev) && pQueueDev != nullptr);
+
+    // Verify COM Identity rule: pQueueDev and pDevice must return identical IUnknown pointers
+    IUnknown* pUnkFromDevice = nullptr;
+    IUnknown* pUnkFromQueueDev = nullptr;
+    pDevice->QueryInterface(IID_PPV_ARGS(&pUnkFromDevice));
+    pQueueDev->QueryInterface(IID_PPV_ARGS(&pUnkFromQueueDev));
+    assert(pUnkFromDevice == pUnkFromQueueDev);
+    pUnkFromDevice->Release();
+    pUnkFromQueueDev->Release();
+
+    pQueueDev->Release();
     std::cout << "[PASS] Command Queue created successfully." << std::endl;
 
     // 2. Create Command Allocator
@@ -82,6 +98,20 @@ int main() {
     hr = pDevice->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&pCommandAllocator));
     std::cout << "CreateCommandAllocator returned hr = 0x" << std::hex << hr << std::dec << std::endl;
     assert(SUCCEEDED(hr) && pCommandAllocator != nullptr);
+    assert(pCommandAllocator->GetDevice(__uuidof(ID3D12Device), nullptr) == E_POINTER);
+    ID3D12Device* pAllocDev = nullptr;
+    HRESULT hrAllocDev = pCommandAllocator->GetDevice(IID_PPV_ARGS(&pAllocDev));
+    std::cout << "pCommandAllocator->GetDevice returned hr = 0x" << std::hex << hrAllocDev << std::dec << std::endl;
+    assert(SUCCEEDED(hrAllocDev) && pAllocDev != nullptr);
+
+    IUnknown* pUnkFromAllocDev = nullptr;
+    pAllocDev->QueryInterface(IID_PPV_ARGS(&pUnkFromAllocDev));
+    pDevice->QueryInterface(IID_PPV_ARGS(&pUnkFromDevice));
+    assert(pUnkFromDevice == pUnkFromAllocDev);
+    pUnkFromDevice->Release();
+    pUnkFromAllocDev->Release();
+
+    pAllocDev->Release();
     std::cout << "[PASS] Command Allocator created successfully." << std::endl;
 
     // 3. Create Graphics Command List
@@ -95,6 +125,25 @@ int main() {
         IID_PPV_ARGS(&pCommandList));
     std::cout << "CreateCommandList returned hr = 0x" << std::hex << hr << std::dec << std::endl;
     assert(SUCCEEDED(hr) && pCommandList != nullptr);
+    assert(pCommandList->GetDevice(__uuidof(ID3D12Device), nullptr) == E_POINTER);
+    ID3D12Device* pListDev = nullptr;
+    HRESULT hrListDev = pCommandList->GetDevice(IID_PPV_ARGS(&pListDev));
+    std::cout << "pCommandList->GetDevice returned hr = 0x" << std::hex << hrListDev << std::dec << std::endl;
+    assert(SUCCEEDED(hrListDev) && pListDev != nullptr);
+
+    IUnknown* pUnkFromListDev = nullptr;
+    pListDev->QueryInterface(IID_PPV_ARGS(&pUnkFromListDev));
+    pDevice->QueryInterface(IID_PPV_ARGS(&pUnkFromDevice));
+    assert(pUnkFromDevice == pUnkFromListDev);
+    pUnkFromDevice->Release();
+    pUnkFromListDev->Release();
+
+    // Verify unproxied higher command list interfaces are blocked (E_NOINTERFACE) to prevent bypass
+    void* pGfxList1 = nullptr;
+    HRESULT hrQI1 = pCommandList->QueryInterface(__uuidof(ID3D12GraphicsCommandList1), &pGfxList1);
+    assert(hrQI1 == E_NOINTERFACE && pGfxList1 == nullptr);
+
+    pListDev->Release();
     std::cout << "[PASS] Graphics Command List created successfully." << std::endl;
 
     // 4. Create Committed Buffer Resource

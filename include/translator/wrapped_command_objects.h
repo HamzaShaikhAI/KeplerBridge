@@ -15,7 +15,7 @@ namespace kepler {
 
 class WrappedD3D12CommandAllocator : public ID3D12CommandAllocator {
 public:
-    WrappedD3D12CommandAllocator(ID3D12CommandAllocator* pReal, D3D12_COMMAND_LIST_TYPE type);
+    WrappedD3D12CommandAllocator(ID3D12CommandAllocator* pReal, D3D12_COMMAND_LIST_TYPE type, ID3D12Device* pDevice = nullptr);
     virtual ~WrappedD3D12CommandAllocator();
 
     // IUnknown
@@ -39,6 +39,7 @@ public:
 
 private:
     ID3D12CommandAllocator* m_pReal = nullptr;
+    ID3D12Device* m_pDevice = nullptr;
     D3D12_COMMAND_LIST_TYPE m_type;
     std::atomic<ULONG> m_refCount{ 1 };
 };
@@ -48,7 +49,8 @@ public:
     WrappedD3D12GraphicsCommandList(
         ID3D12GraphicsCommandList* pReal,
         D3D12_COMMAND_LIST_TYPE type,
-        ID3D12CommandAllocator* pAllocator);
+        ID3D12CommandAllocator* pAllocator,
+        ID3D12Device* pDevice = nullptr);
     virtual ~WrappedD3D12GraphicsCommandList();
 
     // IUnknown
@@ -126,7 +128,10 @@ public:
     bool IsClosed() const { return m_isClosed; }
 
 private:
+    bool ShouldForwardToReal() const;
+
     ID3D12GraphicsCommandList* m_pReal = nullptr;
+    ID3D12Device* m_pDevice = nullptr;
     D3D12_COMMAND_LIST_TYPE m_type;
     ID3D12CommandAllocator* m_pCurrentAllocator = nullptr;
     std::atomic<ULONG> m_refCount{ 1 };
@@ -137,7 +142,7 @@ private:
 
 class WrappedD3D12CommandQueue : public ID3D12CommandQueue {
 public:
-    WrappedD3D12CommandQueue(ID3D12CommandQueue* pReal, const D3D12_COMMAND_QUEUE_DESC* pDesc);
+    WrappedD3D12CommandQueue(ID3D12CommandQueue* pReal, const D3D12_COMMAND_QUEUE_DESC* pDesc, ID3D12Device* pDevice = nullptr);
     virtual ~WrappedD3D12CommandQueue();
 
     // IUnknown
@@ -176,6 +181,7 @@ public:
 
 private:
     ID3D12CommandQueue* m_pReal = nullptr;
+    ID3D12Device* m_pDevice = nullptr;
     D3D12_COMMAND_QUEUE_DESC m_desc = {};
     std::atomic<ULONG> m_refCount{ 1 };
     std::mutex m_mutex;

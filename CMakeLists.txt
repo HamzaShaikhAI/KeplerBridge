@@ -23,6 +23,9 @@ set(CORE_SOURCES
     src/resource_manager.cpp
     src/d3d11_backend.cpp
     src/wrapped_command_objects.cpp
+    src/wrapped_dxgi_swapchain.cpp
+    src/bounded_shader_translator.cpp
+    src/shader_disk_cache.cpp
 )
 
 set(SOURCES
@@ -144,6 +147,107 @@ target_include_directories(test_d3d12_translation PRIVATE ${CMAKE_CURRENT_SOURCE
 target_link_libraries(test_d3d12_translation PRIVATE dxgi dxguid user32 d3d11)
 if(NOT MSVC)
     target_link_options(test_d3d12_translation PRIVATE -static -static-libgcc -static-libstdc++)
+endif()
+
+# Integration Test: Live Hardware Phase 4 Rendering & Presentation Proof
+add_executable(test_d3d12_rendering
+    tests/test_d3d12_rendering.cpp
+)
+target_include_directories(test_d3d12_rendering PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+target_link_libraries(test_d3d12_rendering PRIVATE dxgi dxguid user32)
+if(NOT MSVC)
+    target_link_options(test_d3d12_rendering PRIVATE -static -static-libgcc -static-libstdc++)
+endif()
+
+# Test B: Standalone D3D11 Initialization
+add_executable(test_d3d11_standalone
+    tests/test_d3d11_standalone.cpp
+)
+target_include_directories(test_d3d11_standalone PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+target_link_libraries(test_d3d11_standalone PRIVATE dxgi dxguid user32 d3d11)
+if(NOT MSVC)
+    target_link_options(test_d3d11_standalone PRIVATE -static -static-libgcc -static-libstdc++)
+endif()
+
+# Integration Test: Live Hardware Phase 5 Application DXGI SwapChain
+add_executable(test_dxgi_swapchain
+    tests/test_dxgi_swapchain.cpp
+)
+target_include_directories(test_dxgi_swapchain PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+target_link_libraries(test_dxgi_swapchain PRIVATE dxgi dxguid user32)
+if(NOT MSVC)
+    target_link_options(test_dxgi_swapchain PRIVATE -static -static-libgcc -static-libstdc++)
+endif()
+
+# Integration Test: Live Hardware Phase 6.1 Compute Shader Execution & UAV Readback
+add_executable(test_d3d12_compute
+    tests/test_d3d12_compute.cpp
+)
+target_include_directories(test_d3d12_compute PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+target_link_libraries(test_d3d12_compute PRIVATE dxgi dxguid user32)
+if(NOT MSVC)
+    target_link_options(test_d3d12_compute PRIVATE -static -static-libgcc -static-libstdc++)
+endif()
+
+# Integration Test: Live Hardware Phase 7 Multi-Slot UAV & Readback Proof
+add_executable(test_d3d12_multi_uav
+    tests/test_d3d12_multi_uav.cpp
+)
+target_include_directories(test_d3d12_multi_uav PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+target_link_libraries(test_d3d12_multi_uav PRIVATE dxgi dxguid user32)
+if(NOT MSVC)
+    target_link_options(test_d3d12_multi_uav PRIVATE -static -static-libgcc -static-libstdc++)
+endif()
+
+# Unit & Integration Test: Phase 6 Bounded Shader Translator & Compatibility
+add_executable(test_shader_compat
+    tests/test_shader_compat.cpp
+    src/bounded_shader_translator.cpp
+    src/shader_disk_cache.cpp
+    src/dxil_inspector.cpp
+    src/shader_policy.cpp
+    src/config.cpp
+    src/logger.cpp
+)
+target_include_directories(test_shader_compat PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+target_link_libraries(test_shader_compat PRIVATE dxgi dxguid user32 d3d11)
+if(NOT MSVC)
+    target_link_options(test_shader_compat PRIVATE -static -static-libgcc -static-libstdc++)
+endif()
+
+# Integration Test: Phase 7 Shader Cache Multi-Process Persistence & Invalidation
+add_executable(test_shader_cache_persistence
+    tests/test_shader_cache_persistence.cpp
+    src/bounded_shader_translator.cpp
+    src/shader_disk_cache.cpp
+    src/dxil_inspector.cpp
+    src/shader_policy.cpp
+    src/config.cpp
+    src/logger.cpp
+)
+target_include_directories(test_shader_cache_persistence PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+target_link_libraries(test_shader_cache_persistence PRIVATE dxgi dxguid user32 d3d11)
+if(NOT MSVC)
+    target_link_options(test_shader_cache_persistence PRIVATE -static -static-libgcc -static-libstdc++)
+endif()
+
+# Performance Profiling & Optimization Benchmark Test
+add_executable(test_perf_profile
+    tests/test_perf_profile.cpp
+    src/bounded_shader_translator.cpp
+    src/shader_disk_cache.cpp
+    src/dxil_inspector.cpp
+    src/shader_policy.cpp
+    src/command_translator.cpp
+    src/resource_manager.cpp
+    src/d3d11_backend.cpp
+    src/config.cpp
+    src/logger.cpp
+)
+target_include_directories(test_perf_profile PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+target_link_libraries(test_perf_profile PRIVATE dxgi dxguid user32 d3d11)
+if(NOT MSVC)
+    target_link_options(test_perf_profile PRIVATE -static -static-libgcc -static-libstdc++)
 endif()
 
 # Legacy Phase 1 Test

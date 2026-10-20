@@ -2,6 +2,8 @@
 #include "core/feature_level_compat.h"
 #include "core/logger.h"
 #include "core/config.h"
+#include "translator/d3d11_backend.h"
+#include "translator/resource_manager.h"
 
 #include <sstream>
 #include <iomanip>
@@ -108,12 +110,11 @@ bool ProxyLoader::EnsureInitialized() {
     return Initialize(nullptr);
 }
 
-void ProxyLoader::Shutdown() {
+void ProxyLoader::Shutdown(bool isProcessDetach) {
     std::lock_guard<std::mutex> lock(m_initMutex);
-    if (m_hRealD3D12) {
-        FreeLibrary(m_hRealD3D12);
-        m_hRealD3D12 = nullptr;
-    }
+    // Note: Do not call FreeLibrary(m_hRealD3D12) here, as Shutdown is invoked from
+    // DllMain (DLL_PROCESS_DETACH) under OS loader lock, which can deadlock graphics driver detach hooks.
+    m_hRealD3D12 = nullptr;
     m_initialized = false;
     RealD3D12CreateDevice = nullptr;
     RealD3D12GetDebugInterface = nullptr;
@@ -202,10 +203,17 @@ HRESULT WINAPI D3D12CreateDevice(
         MinimumFeatureLevel);
 
     bool needsWrapper = policy.should_intercept ||
+                        Config::Instance().IsD3D11TranslationEnabled() ||
                         Config::Instance().IsTextureClampingEnabled() ||
                         Config::Instance().IsShaderFallbackEnabled();
 
     LOG_INFO("[COMPAT] Policy Evaluation: " + policy.reason);
+    if (Config::Instance().IsD3D11TranslationEnabled()) {
+        LOG_INFO("[BACKEND] Active execution backend: Direct3D 11 Translation Engine.");
+    } else {
+        LOG_INFO("[BACKEND] Active execution backend: Direct3D 12 Native Hardware.");
+    }
+
     if (needsWrapper) {
         D3D_FEATURE_LEVEL creationLevel = policy.should_intercept ? policy.creation_level : MinimumFeatureLevel;
         D3D_FEATURE_LEVEL spoofLevel = policy.should_intercept ? policy.target_spoof_level : MinimumFeatureLevel;
@@ -254,6 +262,7 @@ HRESULT WINAPI D3D12CreateDevice(
     }
 
     // Native passthrough path (unmodified call to real d3d12.dll)
+    LOG_INFO("[BACKEND] Operating in raw native passthrough mode (wrapper bypassed).");
     HRESULT hr = loader.RealD3D12CreateDevice(pAdapter, MinimumFeatureLevel, riid, ppDevice);
     LOG_HOOK("Returned HRESULT: " + Logger::HResultToString(hr));
 
@@ -456,6 +465,71 @@ HRESULT WINAPI SetAppCompatStringPointer(UINT index, PCWSTR str) {
         return loader.RealSetAppCompatStringPointer(index, str);
     }
     return E_NOTIMPL;
+}
+
+// ============================================================================
+// KeplerBridge Diagnostic & Proof Exports
+// ============================================================================
+
+HRESULT WINAPI KeplerBridge_ReadbackRenderTarget(
+    ID3D12Resource* pD3D12Resource,
+    void* pOutPixels,
+    UINT* pOutWidth,
+    UINT* pOutHeight)
+{
+    using namespace kepler;
+    if (!pD3D12Resource || !pOutPixels || !pOutWidth || !pOutHeight) {
+        return E_POINTER;
+    }
+    std::vector<uint32_t> pixels;
+    UINT w = 0, h = 0;
+    HRESULT hr = D3D11Backend::Instance().ReadbackRenderTarget(pD3D12Resource, pixels, w, h);
+    if (FAILED(hr)) return hr;
+
+    *pOutWidth = w;
+    *pOutHeight = h;
+    memcpy(pOutPixels, pixels.data(), pixels.size() * sizeof(uint32_t));
+    return S_OK;
+}
+
+HRESULT WINAPI KeplerBridge_ReadbackBuffer(
+    ID3D12Resource* pD3D12Resource,
+    void* pOutData,
+    SIZE_T numBytes)
+{
+    using namespace kepler;
+    if (!pD3D12Resource || !pOutData || numBytes == 0) {
+        return E_POINTER;
+    }
+    return D3D11Backend::Instance().ReadbackBuffer(pD3D12Resource, pOutData, numBytes);
+}
+
+HRESULT WINAPI KeplerBridge_CreateSwapChainForHwnd(
+    HWND hwnd,
+    UINT width,
+    UINT height,
+    IDXGISwapChain** ppSwapChain)
+{
+    using namespace kepler;
+    return D3D11Backend::Instance().CreateSwapChainForHwnd(hwnd, width, height, ppSwapChain);
+}
+
+HRESULT WINAPI KeplerBridge_PresentSwapChain(
+    IDXGISwapChain* pSwapChain,
+    UINT syncInterval,
+    UINT flags)
+{
+    using namespace kepler;
+    return D3D11Backend::Instance().PresentSwapChain(pSwapChain, syncInterval, flags);
+}
+
+void WINAPI KeplerBridge_GetTranslationStats(
+    UINT* pTranslatedCount,
+    UINT* pRejectedCount)
+{
+    using namespace kepler;
+    if (pTranslatedCount) *pTranslatedCount = D3D11Backend::Instance().GetTranslatedCommandsCount();
+    if (pRejectedCount) *pRejectedCount = D3D11Backend::Instance().GetRejectedCommandsCount();
 }
 
 } // extern "C"

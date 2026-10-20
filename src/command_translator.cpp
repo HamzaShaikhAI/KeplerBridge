@@ -311,6 +311,9 @@ RecordedCommand& RecordedCommand::operator=(RecordedCommand&& other) noexcept {
 }
 
 void CommandBatch::Append(RecordedCommand&& cmd) {
+    if (m_commands.capacity() < 64) {
+        m_commands.reserve(64);
+    }
     m_commands.push_back(std::move(cmd));
 }
 

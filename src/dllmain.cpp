@@ -6,6 +6,7 @@
 #include "core/logger.h"
 #include "core/config.h"
 #include "core/proxy_loader.h"
+#include "translator/d3d11_backend.h"
 
 #include <string>
 
@@ -58,6 +59,33 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserv
             kepler::Config::Instance().Load(iniPath);
             kepler::Config::Instance().LogSettings();
 
+            // Hardware capability probing & banner
+            std::string adapterName = "Unknown GPU";
+            uint64_t vramBytes = 0;
+            IDXGIFactory1* pFactory = nullptr;
+            if (SUCCEEDED(CreateDXGIFactory1(IID_PPV_ARGS(&pFactory)))) {
+                IDXGIAdapter1* pAdapter1 = nullptr;
+                if (pFactory->EnumAdapters1(0, &pAdapter1) != DXGI_ERROR_NOT_FOUND) {
+                    DXGI_ADAPTER_DESC1 desc = {};
+                    if (SUCCEEDED(pAdapter1->GetDesc1(&desc))) {
+                        char descA[128] = { 0 };
+                        WideCharToMultiByte(CP_ACP, 0, desc.Description, -1, descA, sizeof(descA), NULL, NULL);
+                        adapterName = descA;
+                        vramBytes = desc.DedicatedVideoMemory;
+                    }
+                    pAdapter1->Release();
+                }
+                pFactory->Release();
+            }
+
+            kepler::Logger::Instance().PrintStartupCapabilityBanner(
+                exePath,
+                dllPath,
+                kepler::Config::Instance().IsD3D11TranslationEnabled(),
+                adapterName,
+                vramBytes,
+                D3D_FEATURE_LEVEL_11_0);
+
             // Initialize proxy loader to hook and forward to System32\d3d12.dll
             if (!kepler::ProxyLoader::Instance().Initialize(hModule)) {
                 LOG_ERROR("Failed to initialize ProxyLoader! Forwarding calls may fail.");
@@ -69,7 +97,10 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserv
 
         case DLL_PROCESS_DETACH: {
             LOG_INFO("DLL_PROCESS_DETACH received. Initiating graceful shutdown.");
-            kepler::ProxyLoader::Instance().Shutdown();
+            // Under OS loader lock in DllMain, releasing graphics driver COM objects causes
+            // NVIDIA driver worker thread deadlocks. Pass isProcessDetach = true to safely teardown.
+            kepler::D3D11Backend::Instance().Shutdown(true);
+            kepler::ProxyLoader::Instance().Shutdown(true);
             LOG_INFO("KeplerBridge unloaded successfully.");
             kepler::Logger::Instance().Shutdown();
             break;

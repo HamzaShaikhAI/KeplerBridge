@@ -20,8 +20,10 @@ int main(int argc, char* argv[]) {
         for (UINT i = 0; pFactory->EnumAdapters1(i, &pAdapter) != DXGI_ERROR_NOT_FOUND; ++i) {
             DXGI_ADAPTER_DESC1 desc;
             pAdapter->GetDesc1(&desc);
-            std::wcout << L"[HARDWARE] Detected Adapter " << i << L": " << desc.Description 
-                       << L" (" << (desc.DedicatedVideoMemory / (1024*1024)) << L" MB VRAM)\n";
+            std::wstring descW(desc.Description);
+            std::string descA(descW.begin(), descW.end());
+            std::cout << "[HARDWARE] Detected Adapter " << i << ": " << descA
+                      << " (" << (desc.DedicatedVideoMemory / (1024*1024)) << " MB VRAM)" << std::endl;
             if (wcsstr(desc.Description, L"GeForce") != nullptr) {
                 break;
             }
@@ -50,32 +52,32 @@ int main(int argc, char* argv[]) {
     }
 
     // --- TEST 1: Capability Probing via Null ppDevice ---
-    std::cout << "\n--- TEST 1: Capability Probing (ppDevice = nullptr) ---\n";
+    std::cout << "\n--- TEST 1: Capability Probing (ppDevice = nullptr) ---\n" << std::flush;
     HRESULT hrNull = pfnCreate(pAdapter, D3D_FEATURE_LEVEL_11_0, __uuidof(ID3D12Device), nullptr);
     std::cout << "D3D12CreateDevice(FL 11_0, ppDevice=nullptr) returned hr = 0x" << std::hex << (unsigned long)hrNull << std::dec << "\n";
     if (hrNull == S_OK) {
-        std::cout << "[PASS] D3D12CreateDevice(ppDevice=nullptr) successfully probed capability per MSDN spec.\n";
+        std::cout << "[PASS] D3D12CreateDevice(ppDevice=nullptr) successfully probed capability per MSDN spec.\n" << std::flush;
     } else {
-        std::cout << "[INFO] D3D12CreateDevice(ppDevice=nullptr) returned hr = 0x" << std::hex << hrNull << std::dec << "\n";
+        std::cout << "[INFO] D3D12CreateDevice(ppDevice=nullptr) returned hr = 0x" << std::hex << hrNull << std::dec << "\n" << std::flush;
     }
 
     // --- TEST 2: Native Feature Level (11_0) Creation ---
-    std::cout << "\n--- TEST 2: Native Feature Level (11_0) Device Creation ---\n";
+    std::cout << "\n--- TEST 2: Native Feature Level (11_0) Device Creation ---\n" << std::flush;
     ID3D12Device* pNativeDevice = nullptr;
     HRESULT hrNative = pfnCreate(pAdapter, D3D_FEATURE_LEVEL_11_0, __uuidof(ID3D12Device), (void**)&pNativeDevice);
-    std::cout << "D3D12CreateDevice(FL 11_0) returned hr = 0x" << std::hex << (unsigned long)hrNative << std::dec << "\n";
+    std::cout << "D3D12CreateDevice(FL 11_0) returned hr = 0x" << std::hex << (unsigned long)hrNative << std::dec << "\n" << std::flush;
     if (SUCCEEDED(hrNative) && pNativeDevice) {
-        std::cout << "[PASS] Native D3D_FEATURE_LEVEL_11_0 creation succeeded! NodeCount=" << pNativeDevice->GetNodeCount() << "\n";
+        std::cout << "[PASS] Native D3D_FEATURE_LEVEL_11_0 creation succeeded! NodeCount=" << pNativeDevice->GetNodeCount() << "\n" << std::flush;
         pNativeDevice->Release();
     } else {
-        std::cout << "[FAIL] Native 11_0 device creation failed!\n";
+        std::cout << "[FAIL] Native 11_0 device creation failed!\n" << std::flush;
     }
 
     // --- TEST 3: Requested D3D_FEATURE_LEVEL_12_0 Creation ---
-    std::cout << "\n--- TEST 3: Requested D3D_FEATURE_LEVEL_12_0 Creation ---\n";
+    std::cout << "\n--- TEST 3: Requested D3D_FEATURE_LEVEL_12_0 Creation ---\n" << std::flush;
     ID3D12Device* pDevice12 = nullptr;
     HRESULT hr12 = pfnCreate(pAdapter, D3D_FEATURE_LEVEL_12_0, __uuidof(ID3D12Device), (void**)&pDevice12);
-    std::cout << "D3D12CreateDevice(FL 12_0) returned hr = 0x" << std::hex << (unsigned long)hr12 << std::dec << "\n";
+    std::cout << "D3D12CreateDevice(FL 12_0) returned hr = 0x" << std::hex << (unsigned long)hr12 << std::dec << "\n" << std::flush;
 
     if (SUCCEEDED(hr12) && pDevice12) {
         std::cout << "[PASS] D3D_FEATURE_LEVEL_12_0 creation SUCCEEDED via KeplerBridge Compatibility Engine!\n";
@@ -91,9 +93,9 @@ int main(int argc, char* argv[]) {
         flData.pFeatureLevelsRequested = requestedLevels;
 
         HRESULT hrCheck = pDevice12->CheckFeatureSupport(D3D12_FEATURE_FEATURE_LEVELS, &flData, sizeof(flData));
-        std::cout << "dev->CheckFeatureSupport(D3D12_FEATURE_FEATURE_LEVELS) returned hr = 0x" 
+        std::cout << "dev->CheckFeatureSupport(D3D12_FEATURE_FEATURE_LEVELS) returned hr = 0x"
                   << std::hex << hrCheck << std::dec << "\n";
-        std::cout << "Reported MaxSupportedFeatureLevel = 0x" 
+        std::cout << "Reported MaxSupportedFeatureLevel = 0x"
                   << std::hex << flData.MaxSupportedFeatureLevel << std::dec << "\n";
 
         if (flData.MaxSupportedFeatureLevel == D3D_FEATURE_LEVEL_12_0) {
@@ -117,7 +119,7 @@ int main(int argc, char* argv[]) {
         pDevice12->Release();
         std::cout << "[PASS] Device released cleanly without crashes or leaks.\n";
     } else {
-        std::cout << "[INFO] D3D_FEATURE_LEVEL_12_0 was rejected natively (hr = 0x" << std::hex << hr12 << std::dec 
+        std::cout << "[INFO] D3D_FEATURE_LEVEL_12_0 was rejected natively (hr = 0x" << std::hex << hr12 << std::dec
                   << "). (Expected if EnableFeatureLevelSpoof=0).\n";
     }
 

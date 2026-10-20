@@ -2,6 +2,8 @@
 #include "downgrader/shader_policy.h"
 #include "core/config.h"
 #include "core/logger.h"
+#include "translator/d3d11_backend.h"
+#include "translator/resource_manager.h"
 #include <sstream>
 
 namespace kepler {
@@ -68,9 +70,10 @@ HRESULT PSOHook::InterceptCreateGraphicsPipelineState(
     }
 
     HRESULT hr = E_FAIL;
+    D3D12_GRAPHICS_PIPELINE_STATE_DESC modifiedDesc = {};
 
     if (anyFallbackApplied) {
-        D3D12_GRAPHICS_PIPELINE_STATE_DESC modifiedDesc = *pDesc;
+        modifiedDesc = *pDesc;
         if (vsDecision.fallbackApplied) {
             modifiedDesc.VS.pShaderBytecode = vsDecision.effectiveBytecode;
             modifiedDesc.VS.BytecodeLength = vsDecision.effectiveLength;
@@ -98,10 +101,49 @@ HRESULT PSOHook::InterceptCreateGraphicsPipelineState(
         hr = pRealDevice->CreateGraphicsPipelineState(pDesc, riid, ppPipelineState);
     }
 
+    if (SUCCEEDED(hr) && ppPipelineState && *ppPipelineState) {
+        if (Config::Instance().IsD3D11TranslationEnabled()) {
+            if (!D3D11Backend::Instance().IsInitialized()) {
+                IDXGIAdapter* pAdapter = D3D11Backend::GetMatchingAdapter(pRealDevice);
+                D3D11Backend::Instance().Initialize(pAdapter);
+                if (pAdapter) pAdapter->Release();
+            }
+            if (D3D11Backend::Instance().IsInitialized()) {
+                const D3D12_GRAPHICS_PIPELINE_STATE_DESC* pEffDesc = anyFallbackApplied ? &modifiedDesc : pDesc;
+                TranslatedPipelineState translatedPSO = {};
+                if (SUCCEEDED(D3D11Backend::Instance().CreateTranslatedPSO(pEffDesc, translatedPSO))) {
+                    ResourceManager::Instance().RegisterPSO(reinterpret_cast<ID3D12PipelineState*>(*ppPipelineState), translatedPSO);
+                    LOG_HOOK("[PSO] Successfully registered translated D3D11 PSO.");
+                }
+            }
+        } else {
+            D3D11Backend::Instance().NotifyPsoCreated();
+        }
+    }
+
     if (inspectionEnabled) {
         LOG_INFO("[PSO] Real D3D12CreateGraphicsPipelineState returned: " + Logger::HResultToString(hr));
         if (FAILED(hr)) {
             LOG_WARN("[PSO] Native pipeline creation failed (HRESULT: " + Logger::HResultToString(hr) + ")");
+            DiagnosticReport rep;
+            bool isDXIL = (vsDecision.inspection.containerType == ShaderContainerType::DXIL || psDecision.inspection.containerType == ShaderContainerType::DXIL);
+            rep.errorCode = isDXIL ? KeplerErrorCode::UnsupportedShaderInstruction : KeplerErrorCode::ShaderCompilationFailed;
+            rep.severity = ErrorSeverity::Error;
+            rep.subsystem = "PSOHook";
+            rep.apiOperation = "CreateGraphicsPipelineState";
+            rep.nativeHResult = hr;
+            rep.disposition = ExecutionDisposition::Rejected;
+            rep.shaderStage = "Graphics (VS+PS)";
+            rep.shaderProfile = "VS:" + DxilInspector::ShaderModelToString(vsDecision.inspection.majorVersion, vsDecision.inspection.minorVersion) +
+                                ", PS:" + DxilInspector::ShaderModelToString(psDecision.inspection.majorVersion, psDecision.inspection.minorVersion);
+            rep.policyResult = "VS:" + vsDecision.actionReason + " | PS:" + psDecision.actionReason;
+            rep.resourceInfo = "Bytecode: VS=" + std::to_string(pDesc ? pDesc->VS.BytecodeLength : 0) +
+                               "B, PS=" + std::to_string(pDesc ? pDesc->PS.BytecodeLength : 0) + "B";
+            rep.explanation = "Graphics pipeline creation failed on native Kepler driver.";
+            rep.actionableHint = isDXIL ?
+                "Shader contains Shader Model 6.x DXIL bytecode. Force -dx11 mode or add SM 5.0 fallback shaders." :
+                "Ensure blend/depth-stencil states and root signatures match D3D11 Feature Level 11_0 constraints.";
+            LOG_DIAGNOSTIC_REPORT(rep);
         } else {
             LOG_INFO("[PSO] Graphics pipeline state created successfully.");
         }
@@ -138,9 +180,9 @@ HRESULT PSOHook::InterceptCreateComputePipelineState(
     }
 
     HRESULT hr = E_FAIL;
+    D3D12_COMPUTE_PIPELINE_STATE_DESC modifiedDesc = pDesc ? *pDesc : D3D12_COMPUTE_PIPELINE_STATE_DESC{};
 
     if (fallbackApplied) {
-        D3D12_COMPUTE_PIPELINE_STATE_DESC modifiedDesc = *pDesc;
         modifiedDesc.CS.pShaderBytecode = csDecision.effectiveBytecode;
         modifiedDesc.CS.BytecodeLength = csDecision.effectiveLength;
         hr = pRealDevice->CreateComputePipelineState(&modifiedDesc, riid, ppPipelineState);
@@ -148,10 +190,47 @@ HRESULT PSOHook::InterceptCreateComputePipelineState(
         hr = pRealDevice->CreateComputePipelineState(pDesc, riid, ppPipelineState);
     }
 
+    if (SUCCEEDED(hr) && ppPipelineState && *ppPipelineState) {
+        if (Config::Instance().IsD3D11TranslationEnabled()) {
+            if (!D3D11Backend::Instance().IsInitialized()) {
+                IDXGIAdapter* pAdapter = D3D11Backend::GetMatchingAdapter(pRealDevice);
+                D3D11Backend::Instance().Initialize(pAdapter);
+                if (pAdapter) pAdapter->Release();
+            }
+            if (D3D11Backend::Instance().IsInitialized()) {
+                const D3D12_COMPUTE_PIPELINE_STATE_DESC* pEffDesc = fallbackApplied ? &modifiedDesc : pDesc;
+                TranslatedPipelineState translatedPSO = {};
+                if (SUCCEEDED(D3D11Backend::Instance().CreateTranslatedComputePSO(pEffDesc, translatedPSO))) {
+                    ResourceManager::Instance().RegisterPSO(reinterpret_cast<ID3D12PipelineState*>(*ppPipelineState), translatedPSO);
+                    LOG_HOOK("[PSO] Successfully registered translated D3D11 Compute PSO.");
+                }
+            }
+        } else {
+            D3D11Backend::Instance().NotifyPsoCreated();
+        }
+    }
+
     if (inspectionEnabled) {
         LOG_INFO("[PSO] Real D3D12CreateComputePipelineState returned: " + Logger::HResultToString(hr));
         if (FAILED(hr)) {
             LOG_WARN("[PSO] Native compute pipeline creation failed (HRESULT: " + Logger::HResultToString(hr) + ")");
+            DiagnosticReport rep;
+            rep.errorCode = (csDecision.inspection.containerType == ShaderContainerType::DXIL) ?
+                KeplerErrorCode::UnsupportedShaderInstruction : KeplerErrorCode::ShaderCompilationFailed;
+            rep.severity = ErrorSeverity::Error;
+            rep.subsystem = "PSOHook";
+            rep.apiOperation = "CreateComputePipelineState";
+            rep.nativeHResult = hr;
+            rep.disposition = ExecutionDisposition::Rejected;
+            rep.shaderStage = "Compute";
+            rep.shaderProfile = DxilInspector::ShaderModelToString(csDecision.inspection.majorVersion, csDecision.inspection.minorVersion);
+            rep.policyResult = csDecision.actionReason;
+            rep.resourceInfo = "BytecodeLength: " + std::to_string(pDesc ? pDesc->CS.BytecodeLength : 0);
+            rep.explanation = "Compute pipeline creation failed on native driver. " + csDecision.actionReason;
+            rep.actionableHint = (csDecision.inspection.containerType == ShaderContainerType::DXIL) ?
+                "Target shader uses Shader Model 6.x DXIL which requires translation or forcing -dx11 engine mode." :
+                "Check shader syntax, root signature compatibility, or resource binding tier limits.";
+            LOG_DIAGNOSTIC_REPORT(rep);
         } else {
             LOG_INFO("[PSO] Compute pipeline state created successfully.");
         }

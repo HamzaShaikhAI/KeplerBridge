@@ -23,16 +23,23 @@ public:
     // Downgrader settings
     bool IsShaderInspectionEnabled() const { return m_enableShaderInspection; }
     bool IsShaderFallbackEnabled() const { return m_enableShaderFallback; }
+    void SetShaderFallbackEnabled(bool enabled) { m_enableShaderFallback = enabled; }
     bool IsTextureClampingEnabled() const { return m_enableTextureClamping; }
     uint32_t GetMaxTextureResolution() const { return m_maxTextureResolution; }
     bool ShouldStripHeavyShaders() const { return m_stripHeavyShaders; }
 
     // Translation settings (Phase 4)
     bool IsD3D11TranslationEnabled() const { return m_enableD3D11Translation; }
+    void SetD3D11TranslationEnabled(bool enabled) { m_enableD3D11Translation = enabled; }
     bool IsBarrierEmulationEnabled() const { return m_emulateBarriers; }
     bool IsStateTrackingEnabled() const { return m_enableStateTracking; }
     bool IsImmediateQueueFlushEnabled() const { return m_immediateQueueFlush; }
     bool IsQueryEmulationEnabled() const { return m_emulateQueries; }
+
+    // Shader Cache settings (Phase 6.1)
+    bool IsShaderDiskCacheEnabled() const { return m_enableShaderDiskCache; }
+    void SetShaderDiskCacheEnabled(bool enabled) { m_enableShaderDiskCache = enabled; }
+    const std::string& GetShaderCacheDirectory() const { return m_shaderCacheDir; }
 
     void LogSettings() const;
 
@@ -61,6 +68,10 @@ private:
     bool m_enableStateTracking = true;
     bool m_immediateQueueFlush = true;
     bool m_emulateQueries = true;
+
+    // Shader Cache settings
+    bool m_enableShaderDiskCache = true;
+    std::string m_shaderCacheDir = "kepler_cache/shaders";
 
     std::string m_configFilePath;
 };

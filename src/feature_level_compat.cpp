@@ -18,9 +18,12 @@ namespace kepler {
 // WrappedD3D12Device Implementation
 // ============================================================================
 
+static std::atomic<int> s_activeDevices{ 0 };
+
 WrappedD3D12Device::WrappedD3D12Device(ID3D12Device* realDevice, D3D_FEATURE_LEVEL spoofedLevel)
     : m_pReal(realDevice), m_refCount(1), m_spoofedLevel(spoofedLevel)
 {
+    s_activeDevices++;
     if (m_pReal) {
         m_pReal->AddRef();
         m_pReal->QueryInterface(__uuidof(ID3D12Device1), reinterpret_cast<void**>(&m_pReal1));
@@ -35,6 +38,12 @@ WrappedD3D12Device::~WrappedD3D12Device() {
     if (m_pReal) {
         m_pReal->Release();
         m_pReal = nullptr;
+    }
+    if (--s_activeDevices == 0) {
+        if (D3D11Backend::Instance().IsInitialized()) {
+            ResourceManager::Instance().Clear();
+            D3D11Backend::Instance().Shutdown();
+        }
     }
 }
 
@@ -100,19 +109,21 @@ UINT STDMETHODCALLTYPE WrappedD3D12Device::GetNodeCount() {
 }
 
 HRESULT STDMETHODCALLTYPE WrappedD3D12Device::CreateCommandQueue(const D3D12_COMMAND_QUEUE_DESC* pDesc, REFIID riid, void** ppCommandQueue) {
-    if (!ppCommandQueue) return E_POINTER;
+    if (!pDesc || !ppCommandQueue) return E_POINTER;
     *ppCommandQueue = nullptr;
     if (!m_pReal) return E_FAIL;
 
     if (Config::Instance().IsD3D11TranslationEnabled() || Config::Instance().IsStateTrackingEnabled()) {
         if (Config::Instance().IsD3D11TranslationEnabled() && !D3D11Backend::Instance().IsInitialized()) {
-            D3D11Backend::Instance().Initialize(nullptr);
+            IDXGIAdapter* pAdapter = D3D11Backend::GetMatchingAdapter(m_pReal);
+            D3D11Backend::Instance().Initialize(pAdapter);
+            if (pAdapter) pAdapter->Release();
         }
         ID3D12CommandQueue* pRealQueue = nullptr;
         HRESULT hr = m_pReal->CreateCommandQueue(pDesc, __uuidof(ID3D12CommandQueue), reinterpret_cast<void**>(&pRealQueue));
         if (FAILED(hr)) return hr;
 
-        auto* wrapped = new WrappedD3D12CommandQueue(pRealQueue, pDesc);
+        auto* wrapped = new WrappedD3D12CommandQueue(pRealQueue, pDesc, this);
         if (pRealQueue) pRealQueue->Release();
 
         HRESULT hrQI = wrapped->QueryInterface(riid, ppCommandQueue);
@@ -133,7 +144,7 @@ HRESULT STDMETHODCALLTYPE WrappedD3D12Device::CreateCommandAllocator(D3D12_COMMA
         HRESULT hr = m_pReal->CreateCommandAllocator(type, __uuidof(ID3D12CommandAllocator), reinterpret_cast<void**>(&pRealAlloc));
         if (FAILED(hr)) return hr;
 
-        auto* wrapped = new WrappedD3D12CommandAllocator(pRealAlloc, type);
+        auto* wrapped = new WrappedD3D12CommandAllocator(pRealAlloc, type, this);
         if (pRealAlloc) pRealAlloc->Release();
 
         HRESULT hrQI = wrapped->QueryInterface(riid, ppCommandAllocator);
@@ -153,7 +164,7 @@ HRESULT STDMETHODCALLTYPE WrappedD3D12Device::CreateComputePipelineState(const D
 }
 
 HRESULT STDMETHODCALLTYPE WrappedD3D12Device::CreateCommandList(UINT nodeMask, D3D12_COMMAND_LIST_TYPE type, ID3D12CommandAllocator* pCommandAllocator, ID3D12PipelineState* pInitialState, REFIID riid, void** ppCommandList) {
-    if (!ppCommandList) return E_POINTER;
+    if (!pCommandAllocator || !ppCommandList) return E_POINTER;
     *ppCommandList = nullptr;
     if (!m_pReal) return E_FAIL;
 
@@ -168,7 +179,10 @@ HRESULT STDMETHODCALLTYPE WrappedD3D12Device::CreateCommandList(UINT nodeMask, D
         HRESULT hr = m_pReal->CreateCommandList(nodeMask, type, realAlloc, pInitialState, __uuidof(ID3D12GraphicsCommandList), reinterpret_cast<void**>(&pRealList));
         if (FAILED(hr)) return hr;
 
-        auto* wrapped = new WrappedD3D12GraphicsCommandList(pRealList, type, pCommandAllocator);
+        auto* wrapped = new WrappedD3D12GraphicsCommandList(pRealList, type, pCommandAllocator, this);
+        if (pInitialState) {
+            wrapped->SetPipelineState(pInitialState);
+        }
         if (pRealList) pRealList->Release();
 
         HRESULT hrQI = wrapped->QueryInterface(riid, ppCommandList);
@@ -216,6 +230,8 @@ HRESULT STDMETHODCALLTYPE WrappedD3D12Device::CheckFeatureSupport(D3D12_FEATURE 
 }
 
 HRESULT STDMETHODCALLTYPE WrappedD3D12Device::CreateDescriptorHeap(const D3D12_DESCRIPTOR_HEAP_DESC* pDescriptorHeapDesc, REFIID riid, void** ppvHeap) {
+    if (!pDescriptorHeapDesc || !ppvHeap) return E_POINTER;
+    *ppvHeap = nullptr;
     return m_pReal ? m_pReal->CreateDescriptorHeap(pDescriptorHeapDesc, riid, ppvHeap) : E_FAIL;
 }
 
@@ -223,12 +239,166 @@ UINT STDMETHODCALLTYPE WrappedD3D12Device::GetDescriptorHandleIncrementSize(D3D1
     return m_pReal ? m_pReal->GetDescriptorHandleIncrementSize(DescriptorHeapType) : 0;
 }
 
+static bool ParseRootSignatureBlob(const void* pBlob, SIZE_T blobLength, TranslatedRootSignature& outSig) {
+    if (!pBlob || blobLength == 0) return false;
+    outSig = {};
+
+    auto& loader = ProxyLoader::Instance();
+    loader.EnsureInitialized();
+
+    if (loader.RealD3D12CreateVersionedRootSignatureDeserializer) {
+        ID3D12VersionedRootSignatureDeserializer* pDeserializer = nullptr;
+        HRESULT hr = loader.RealD3D12CreateVersionedRootSignatureDeserializer(
+            pBlob, blobLength, IID_PPV_ARGS(&pDeserializer));
+        if (SUCCEEDED(hr) && pDeserializer) {
+            const D3D12_VERSIONED_ROOT_SIGNATURE_DESC* pVerDesc = pDeserializer->GetUnconvertedRootSignatureDesc();
+            if (pVerDesc) {
+                if (pVerDesc->Version == D3D_ROOT_SIGNATURE_VERSION_1_0) {
+                    const auto& desc = pVerDesc->Desc_1_0;
+                    outSig.flags = desc.Flags;
+                    outSig.parameters.resize(desc.NumParameters);
+                    for (UINT i = 0; i < desc.NumParameters; ++i) {
+                        const auto& p = desc.pParameters[i];
+                        outSig.parameters[i].type = p.ParameterType;
+                        outSig.parameters[i].visibility = p.ShaderVisibility;
+                        if (p.ParameterType == D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS) {
+                            outSig.parameters[i].shaderRegister = p.Constants.ShaderRegister;
+                            outSig.parameters[i].registerSpace = p.Constants.RegisterSpace;
+                            outSig.parameters[i].num32BitValues = p.Constants.Num32BitValues;
+                        } else if (p.ParameterType == D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE) {
+                            UINT runningOffset = 0;
+                            for (UINT r = 0; r < p.DescriptorTable.NumDescriptorRanges; ++r) {
+                                const auto& range = p.DescriptorTable.pDescriptorRanges[r];
+                                UINT offset = (range.OffsetInDescriptorsFromTableStart == D3D12_DESCRIPTOR_RANGE_OFFSET_APPEND) ?
+                                    runningOffset : range.OffsetInDescriptorsFromTableStart;
+                                TranslatedDescriptorRange trRange;
+                                trRange.rangeType = range.RangeType;
+                                trRange.numDescriptors = range.NumDescriptors;
+                                trRange.baseShaderRegister = range.BaseShaderRegister;
+                                trRange.registerSpace = range.RegisterSpace;
+                                trRange.offsetInDescriptorsFromTableStart = offset;
+                                outSig.parameters[i].ranges.push_back(trRange);
+                                runningOffset = offset + range.NumDescriptors;
+                            }
+                        } else if (p.ParameterType == D3D12_ROOT_PARAMETER_TYPE_CBV ||
+                                   p.ParameterType == D3D12_ROOT_PARAMETER_TYPE_SRV ||
+                                   p.ParameterType == D3D12_ROOT_PARAMETER_TYPE_UAV) {
+                            outSig.parameters[i].shaderRegister = p.Descriptor.ShaderRegister;
+                            outSig.parameters[i].registerSpace = p.Descriptor.RegisterSpace;
+                        }
+                    }
+                } else if (pVerDesc->Version == D3D_ROOT_SIGNATURE_VERSION_1_1) {
+                    const auto& desc = pVerDesc->Desc_1_1;
+                    outSig.flags = desc.Flags;
+                    outSig.parameters.resize(desc.NumParameters);
+                    for (UINT i = 0; i < desc.NumParameters; ++i) {
+                        const auto& p = desc.pParameters[i];
+                        outSig.parameters[i].type = p.ParameterType;
+                        outSig.parameters[i].visibility = p.ShaderVisibility;
+                        if (p.ParameterType == D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS) {
+                            outSig.parameters[i].shaderRegister = p.Constants.ShaderRegister;
+                            outSig.parameters[i].registerSpace = p.Constants.RegisterSpace;
+                            outSig.parameters[i].num32BitValues = p.Constants.Num32BitValues;
+                        } else if (p.ParameterType == D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE) {
+                            UINT runningOffset = 0;
+                            for (UINT r = 0; r < p.DescriptorTable.NumDescriptorRanges; ++r) {
+                                const auto& range = p.DescriptorTable.pDescriptorRanges[r];
+                                UINT offset = (range.OffsetInDescriptorsFromTableStart == D3D12_DESCRIPTOR_RANGE_OFFSET_APPEND) ?
+                                    runningOffset : range.OffsetInDescriptorsFromTableStart;
+                                TranslatedDescriptorRange trRange;
+                                trRange.rangeType = range.RangeType;
+                                trRange.numDescriptors = range.NumDescriptors;
+                                trRange.baseShaderRegister = range.BaseShaderRegister;
+                                trRange.registerSpace = range.RegisterSpace;
+                                trRange.offsetInDescriptorsFromTableStart = offset;
+                                outSig.parameters[i].ranges.push_back(trRange);
+                                runningOffset = offset + range.NumDescriptors;
+                            }
+                        } else if (p.ParameterType == D3D12_ROOT_PARAMETER_TYPE_CBV ||
+                                   p.ParameterType == D3D12_ROOT_PARAMETER_TYPE_SRV ||
+                                   p.ParameterType == D3D12_ROOT_PARAMETER_TYPE_UAV) {
+                            outSig.parameters[i].shaderRegister = p.Descriptor.ShaderRegister;
+                            outSig.parameters[i].registerSpace = p.Descriptor.RegisterSpace;
+                        }
+                    }
+                }
+            }
+            pDeserializer->Release();
+            return true;
+        }
+    }
+
+    if (loader.RealD3D12CreateRootSignatureDeserializer) {
+        ID3D12RootSignatureDeserializer* pDeserializer = nullptr;
+        HRESULT hr = loader.RealD3D12CreateRootSignatureDeserializer(
+            pBlob, blobLength, IID_PPV_ARGS(&pDeserializer));
+        if (SUCCEEDED(hr) && pDeserializer) {
+            const D3D12_ROOT_SIGNATURE_DESC* pDesc = pDeserializer->GetRootSignatureDesc();
+            if (pDesc) {
+                outSig.flags = pDesc->Flags;
+                outSig.parameters.resize(pDesc->NumParameters);
+                for (UINT i = 0; i < pDesc->NumParameters; ++i) {
+                    const auto& p = pDesc->pParameters[i];
+                    outSig.parameters[i].type = p.ParameterType;
+                    outSig.parameters[i].visibility = p.ShaderVisibility;
+                    if (p.ParameterType == D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS) {
+                        outSig.parameters[i].shaderRegister = p.Constants.ShaderRegister;
+                        outSig.parameters[i].registerSpace = p.Constants.RegisterSpace;
+                        outSig.parameters[i].num32BitValues = p.Constants.Num32BitValues;
+                    } else if (p.ParameterType == D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE) {
+                        UINT runningOffset = 0;
+                        for (UINT r = 0; r < p.DescriptorTable.NumDescriptorRanges; ++r) {
+                            const auto& range = p.DescriptorTable.pDescriptorRanges[r];
+                            UINT offset = (range.OffsetInDescriptorsFromTableStart == D3D12_DESCRIPTOR_RANGE_OFFSET_APPEND) ?
+                                runningOffset : range.OffsetInDescriptorsFromTableStart;
+                            TranslatedDescriptorRange trRange;
+                            trRange.rangeType = range.RangeType;
+                            trRange.numDescriptors = range.NumDescriptors;
+                            trRange.baseShaderRegister = range.BaseShaderRegister;
+                            trRange.registerSpace = range.RegisterSpace;
+                            trRange.offsetInDescriptorsFromTableStart = offset;
+                            outSig.parameters[i].ranges.push_back(trRange);
+                            runningOffset = offset + range.NumDescriptors;
+                        }
+                    } else if (p.ParameterType == D3D12_ROOT_PARAMETER_TYPE_CBV ||
+                               p.ParameterType == D3D12_ROOT_PARAMETER_TYPE_SRV ||
+                               p.ParameterType == D3D12_ROOT_PARAMETER_TYPE_UAV) {
+                        outSig.parameters[i].shaderRegister = p.Descriptor.ShaderRegister;
+                        outSig.parameters[i].registerSpace = p.Descriptor.RegisterSpace;
+                    }
+                }
+            }
+            pDeserializer->Release();
+            return true;
+        }
+    }
+
+    return false;
+}
+
 HRESULT STDMETHODCALLTYPE WrappedD3D12Device::CreateRootSignature(UINT nodeMask, const void* pBlobWithRootSignature, SIZE_T blobLengthInBytes, REFIID riid, void** ppvRootSignature) {
-    return m_pReal ? m_pReal->CreateRootSignature(nodeMask, pBlobWithRootSignature, blobLengthInBytes, riid, ppvRootSignature) : E_FAIL;
+    HRESULT hr = m_pReal ? m_pReal->CreateRootSignature(nodeMask, pBlobWithRootSignature, blobLengthInBytes, riid, ppvRootSignature) : E_FAIL;
+    if (SUCCEEDED(hr) && ppvRootSignature && *ppvRootSignature) {
+        TranslatedRootSignature sig = {};
+        if (ParseRootSignatureBlob(pBlobWithRootSignature, blobLengthInBytes, sig)) {
+            ResourceManager::Instance().RegisterRootSignature(
+                reinterpret_cast<ID3D12RootSignature*>(*ppvRootSignature), sig);
+        }
+    }
+    return hr;
 }
 
 void STDMETHODCALLTYPE WrappedD3D12Device::CreateConstantBufferView(const D3D12_CONSTANT_BUFFER_VIEW_DESC* pDesc, D3D12_CPU_DESCRIPTOR_HANDLE DestDescriptor) {
     if (m_pReal) m_pReal->CreateConstantBufferView(pDesc, DestDescriptor);
+    if (Config::Instance().IsD3D11TranslationEnabled() && D3D11Backend::Instance().IsInitialized() && pDesc) {
+        TranslatedResourceInfo bufInfo;
+        UINT64 byteOffset = 0;
+        if (ResourceManager::Instance().FindBufferByGPUVA(pDesc->BufferLocation, bufInfo, byteOffset)) {
+            if (bufInfo.pD3D11Buffer) {
+                ResourceManager::Instance().RegisterCBV(DestDescriptor.ptr, bufInfo.pD3D11Buffer);
+            }
+        }
+    }
 }
 
 void STDMETHODCALLTYPE WrappedD3D12Device::CreateShaderResourceView(ID3D12Resource* pResource, const D3D12_SHADER_RESOURCE_VIEW_DESC* pDesc, D3D12_CPU_DESCRIPTOR_HANDLE DestDescriptor) {
@@ -246,18 +416,280 @@ void STDMETHODCALLTYPE WrappedD3D12Device::CreateShaderResourceView(ID3D12Resour
     }
 }
 
+static UINT GetFormatByteSize(DXGI_FORMAT format) {
+    switch (format) {
+        case DXGI_FORMAT_R32G32B32A32_TYPELESS:
+        case DXGI_FORMAT_R32G32B32A32_FLOAT:
+        case DXGI_FORMAT_R32G32B32A32_UINT:
+        case DXGI_FORMAT_R32G32B32A32_SINT:
+            return 16;
+        case DXGI_FORMAT_R32G32B32_TYPELESS:
+        case DXGI_FORMAT_R32G32B32_FLOAT:
+        case DXGI_FORMAT_R32G32B32_UINT:
+        case DXGI_FORMAT_R32G32B32_SINT:
+            return 12;
+        case DXGI_FORMAT_R16G16B16A16_TYPELESS:
+        case DXGI_FORMAT_R16G16B16A16_FLOAT:
+        case DXGI_FORMAT_R16G16B16A16_UNORM:
+        case DXGI_FORMAT_R16G16B16A16_UINT:
+        case DXGI_FORMAT_R16G16B16A16_SNORM:
+        case DXGI_FORMAT_R16G16B16A16_SINT:
+        case DXGI_FORMAT_R32G32_TYPELESS:
+        case DXGI_FORMAT_R32G32_FLOAT:
+        case DXGI_FORMAT_R32G32_UINT:
+        case DXGI_FORMAT_R32G32_SINT:
+            return 8;
+        case DXGI_FORMAT_R8G8B8A8_TYPELESS:
+        case DXGI_FORMAT_R8G8B8A8_UNORM:
+        case DXGI_FORMAT_R8G8B8A8_UNORM_SRGB:
+        case DXGI_FORMAT_R8G8B8A8_UINT:
+        case DXGI_FORMAT_R8G8B8A8_SNORM:
+        case DXGI_FORMAT_R8G8B8A8_SINT:
+        case DXGI_FORMAT_B8G8R8A8_UNORM:
+        case DXGI_FORMAT_B8G8R8A8_UNORM_SRGB:
+        case DXGI_FORMAT_R16G16_TYPELESS:
+        case DXGI_FORMAT_R16G16_FLOAT:
+        case DXGI_FORMAT_R16G16_UNORM:
+        case DXGI_FORMAT_R16G16_UINT:
+        case DXGI_FORMAT_R16G16_SNORM:
+        case DXGI_FORMAT_R16G16_SINT:
+        case DXGI_FORMAT_R32_TYPELESS:
+        case DXGI_FORMAT_D32_FLOAT:
+        case DXGI_FORMAT_R32_FLOAT:
+        case DXGI_FORMAT_R32_UINT:
+        case DXGI_FORMAT_R32_SINT:
+            return 4;
+        case DXGI_FORMAT_R8G8_TYPELESS:
+        case DXGI_FORMAT_R8G8_UNORM:
+        case DXGI_FORMAT_R8G8_UINT:
+        case DXGI_FORMAT_R8G8_SNORM:
+        case DXGI_FORMAT_R8G8_SINT:
+        case DXGI_FORMAT_R16_TYPELESS:
+        case DXGI_FORMAT_R16_FLOAT:
+        case DXGI_FORMAT_D16_UNORM:
+        case DXGI_FORMAT_R16_UNORM:
+        case DXGI_FORMAT_R16_UINT:
+        case DXGI_FORMAT_R16_SNORM:
+        case DXGI_FORMAT_R16_SINT:
+            return 2;
+        case DXGI_FORMAT_R8_TYPELESS:
+        case DXGI_FORMAT_R8_UNORM:
+        case DXGI_FORMAT_R8_UINT:
+        case DXGI_FORMAT_R8_SNORM:
+        case DXGI_FORMAT_R8_SINT:
+        case DXGI_FORMAT_A8_UNORM:
+            return 1;
+        default:
+            return 0;
+    }
+}
+
 void STDMETHODCALLTYPE WrappedD3D12Device::CreateUnorderedAccessView(ID3D12Resource* pResource, ID3D12Resource* pCounterResource, const D3D12_UNORDERED_ACCESS_VIEW_DESC* pDesc, D3D12_CPU_DESCRIPTOR_HANDLE DestDescriptor) {
-    if (m_pReal) m_pReal->CreateUnorderedAccessView(pResource, pCounterResource, pDesc, DestDescriptor);
-    if (Config::Instance().IsD3D11TranslationEnabled() && D3D11Backend::Instance().IsInitialized() && pResource) {
-        TranslatedResourceInfo info;
-        if (ResourceManager::Instance().GetResourceInfo(pResource, info) && info.pD3D11Resource) {
-            ID3D11UnorderedAccessView* pUAV = nullptr;
-            D3D11Backend::Instance().GetDevice()->CreateUnorderedAccessView(info.pD3D11Resource, nullptr, &pUAV);
-            if (pUAV) {
-                ResourceManager::Instance().RegisterUAV(DestDescriptor.ptr, pUAV);
-                pUAV->Release();
+    if (!Config::Instance().IsD3D11TranslationEnabled() || !D3D11Backend::Instance().IsInitialized()) {
+        if (m_pReal) m_pReal->CreateUnorderedAccessView(pResource, pCounterResource, pDesc, DestDescriptor);
+        return;
+    }
+
+    if (!DestDescriptor.ptr) {
+        LOG_WARN("[UAV] CreateUnorderedAccessView called with NULL DestDescriptor.");
+        return;
+    }
+
+    // D3D12 allows creating a null view descriptor when pResource is nullptr
+    if (!pResource) {
+        LOG_INFO("[UAV] CreateUnorderedAccessView creating NULL UAV descriptor.");
+        TranslatedUAVInfo nullInfo = {};
+        ResourceManager::Instance().RegisterUAVInfo(DestDescriptor.ptr, nullInfo);
+        if (m_pReal) m_pReal->CreateUnorderedAccessView(nullptr, pCounterResource, pDesc, DestDescriptor);
+        return;
+    }
+
+    TranslatedResourceInfo resInfo;
+    if (!ResourceManager::Instance().GetResourceInfo(pResource, resInfo) || !resInfo.pD3D11Resource) {
+        LOG_WARN("[UAV] CreateUnorderedAccessView: Resource not tracked or missing D3D11 resource.");
+        return;
+    }
+
+    if (!(resInfo.d3d12Desc.Flags & D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS)) {
+        LOG_WARN("[UAV] CreateUnorderedAccessView rejected: Resource lacks D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS.");
+        return;
+    }
+
+    ID3D11UnorderedAccessView* pUAV = nullptr;
+    TranslatedUAVInfo uavInfo = {};
+    uavInfo.pD3D12Resource = pResource;
+    uavInfo.pD3D11Resource = resInfo.pD3D11Resource;
+    uavInfo.pCounterResource = pCounterResource;
+
+    if (resInfo.pD3D11Buffer) {
+        D3D11_UNORDERED_ACCESS_VIEW_DESC uavDesc = {};
+        uavDesc.ViewDimension = D3D11_UAV_DIMENSION_BUFFER;
+
+        if (pDesc) {
+            if (pDesc->ViewDimension != D3D12_UAV_DIMENSION_BUFFER) {
+                LOG_WARN("[UAV] CreateUnorderedAccessView rejected: ViewDimension mismatch for buffer resource.");
+                return;
             }
+
+            uavDesc.Format = pDesc->Format;
+            uavDesc.Buffer.FirstElement = static_cast<UINT>(pDesc->Buffer.FirstElement);
+            uavDesc.Buffer.NumElements = pDesc->Buffer.NumElements;
+            uavDesc.Buffer.Flags = 0;
+
+            UINT64 bufferWidth = resInfo.d3d12Desc.Width;
+
+            // 1. Structured Buffer validation
+            if (pDesc->Buffer.StructureByteStride > 0) {
+                if (pDesc->Buffer.StructureByteStride % 4 != 0) {
+                    LOG_WARN("[UAV] CreateUnorderedAccessView rejected: StructureByteStride (" +
+                             std::to_string(pDesc->Buffer.StructureByteStride) + ") is not a multiple of 4.");
+                    DiagnosticReport rep;
+                    rep.errorCode = KeplerErrorCode::InvalidDescriptor;
+                    rep.severity = ErrorSeverity::Warning;
+                    rep.subsystem = "WrappedD3D12Device";
+                    rep.apiOperation = "CreateUnorderedAccessView";
+                    rep.nativeHResult = E_INVALIDARG;
+                    rep.disposition = ExecutionDisposition::Rejected;
+                    rep.descriptorInfo = "Handle: 0x" + Logger::HexToString(DestDescriptor.ptr);
+                    rep.resourceInfo = "Stride: " + std::to_string(pDesc->Buffer.StructureByteStride) + "B";
+                    rep.explanation = "Structured buffer stride is not a multiple of 4 bytes.";
+                    rep.actionableHint = "Direct3D 11 hardware requires structured buffer element strides to be a multiple of 4.";
+                    LOG_DIAGNOSTIC_REPORT(rep);
+                    return;
+                }
+                if (pDesc->Buffer.StructureByteStride > 2048) {
+                    LOG_WARN("[UAV] CreateUnorderedAccessView rejected: StructureByteStride (" +
+                             std::to_string(pDesc->Buffer.StructureByteStride) + ") exceeds FL 11_0 maximum of 2048 bytes.");
+                    DiagnosticReport rep;
+                    rep.errorCode = KeplerErrorCode::InvalidDescriptor;
+                    rep.severity = ErrorSeverity::Warning;
+                    rep.subsystem = "WrappedD3D12Device";
+                    rep.apiOperation = "CreateUnorderedAccessView";
+                    rep.nativeHResult = E_INVALIDARG;
+                    rep.disposition = ExecutionDisposition::Rejected;
+                    rep.descriptorInfo = "Handle: 0x" + Logger::HexToString(DestDescriptor.ptr);
+                    rep.resourceInfo = "Stride: " + std::to_string(pDesc->Buffer.StructureByteStride) + "B";
+                    rep.explanation = "Structured buffer stride exceeds Feature Level 11_0 limit of 2048 bytes.";
+                    rep.actionableHint = "Keep structured buffer element sizes <= 2048 bytes for Kepler hardware compatibility.";
+                    LOG_DIAGNOSTIC_REPORT(rep);
+                    return;
+                }
+                uavDesc.Format = DXGI_FORMAT_UNKNOWN;
+
+                UINT64 totalBytes = (static_cast<UINT64>(pDesc->Buffer.FirstElement) + pDesc->Buffer.NumElements) * pDesc->Buffer.StructureByteStride;
+                if (totalBytes > bufferWidth) {
+                    LOG_WARN("[UAV] CreateUnorderedAccessView rejected: Structured buffer view (" +
+                             std::to_string(totalBytes) + " bytes) exceeds buffer width (" + std::to_string(bufferWidth) + ").");
+                    DiagnosticReport rep;
+                    rep.errorCode = KeplerErrorCode::BufferDimensionExceeded;
+                    rep.severity = ErrorSeverity::Warning;
+                    rep.subsystem = "WrappedD3D12Device";
+                    rep.apiOperation = "CreateUnorderedAccessView";
+                    rep.nativeHResult = E_INVALIDARG;
+                    rep.disposition = ExecutionDisposition::Rejected;
+                    rep.descriptorInfo = "Handle: 0x" + Logger::HexToString(DestDescriptor.ptr);
+                    rep.resourceInfo = "ViewBytes: " + std::to_string(totalBytes) + "B > Width: " + std::to_string(bufferWidth) + "B";
+                    rep.explanation = "Structured buffer view bounds exceed the buffer capacity.";
+                    rep.actionableHint = "Ensure FirstElement + NumElements does not overflow buffer Width.";
+                    LOG_DIAGNOSTIC_REPORT(rep);
+                    return;
+                }
+
+                // If underlying D3D11 buffer was created without D3D11_RESOURCE_MISC_BUFFER_STRUCTURED,
+                // recreate it with STRUCTURED flag so D3D11 driver allows the structured UAV.
+                D3D11_BUFFER_DESC currentBufDesc = {};
+                resInfo.pD3D11Buffer->GetDesc(&currentBufDesc);
+                if (!(currentBufDesc.MiscFlags & D3D11_RESOURCE_MISC_BUFFER_STRUCTURED) ||
+                    currentBufDesc.StructureByteStride != pDesc->Buffer.StructureByteStride)
+                {
+                    D3D11_BUFFER_DESC newDesc = currentBufDesc;
+                    newDesc.MiscFlags &= ~D3D11_RESOURCE_MISC_BUFFER_ALLOW_RAW_VIEWS;
+                    newDesc.MiscFlags |= D3D11_RESOURCE_MISC_BUFFER_STRUCTURED;
+                    newDesc.StructureByteStride = pDesc->Buffer.StructureByteStride;
+
+                    ID3D11Buffer* pNewBuf = nullptr;
+                    if (SUCCEEDED(D3D11Backend::Instance().GetDevice()->CreateBuffer(&newDesc, nullptr, &pNewBuf))) {
+                        D3D11Backend::Instance().GetContext()->CopyResource(pNewBuf, resInfo.pD3D11Buffer);
+                        ResourceManager::Instance().UpdateD3D11ResourceForBuffer(pResource, pNewBuf);
+                        resInfo.pD3D11Buffer = pNewBuf;
+                        resInfo.pD3D11Resource = pNewBuf;
+                        uavInfo.pD3D11Resource = pNewBuf;
+                        pNewBuf->Release();
+                    }
+                }
+
+                uavInfo.structureByteStride = pDesc->Buffer.StructureByteStride;
+            }
+            // 2. Raw (ByteAddress) Buffer validation
+            else if (pDesc->Buffer.Flags & D3D12_BUFFER_UAV_FLAG_RAW) {
+                uavDesc.Format = DXGI_FORMAT_R32_TYPELESS;
+                uavDesc.Buffer.Flags |= D3D11_BUFFER_UAV_FLAG_RAW;
+                UINT64 totalBytes = (static_cast<UINT64>(pDesc->Buffer.FirstElement) + pDesc->Buffer.NumElements) * 4;
+                if (totalBytes > bufferWidth) {
+                    LOG_WARN("[UAV] CreateUnorderedAccessView rejected: Raw buffer view exceeds buffer width.");
+                    return;
+                }
+            }
+            // 3. Typed Buffer validation
+            else {
+                if (pDesc->Format == DXGI_FORMAT_UNKNOWN) {
+                    LOG_WARN("[UAV] CreateUnorderedAccessView rejected: Typed buffer UAV cannot have DXGI_FORMAT_UNKNOWN with zero stride.");
+                    return;
+                }
+                UINT formatSize = GetFormatByteSize(pDesc->Format);
+                if (formatSize == 0) formatSize = 4;
+                UINT64 totalBytes = (static_cast<UINT64>(pDesc->Buffer.FirstElement) + pDesc->Buffer.NumElements) * formatSize;
+                if (totalBytes > bufferWidth) {
+                    LOG_WARN("[UAV] CreateUnorderedAccessView rejected: Typed buffer view exceeds buffer width.");
+                    return;
+                }
+            }
+
+            // Counter-resource handling
+            if (pCounterResource) {
+                TranslatedResourceInfo counterInfo;
+                if (ResourceManager::Instance().GetResourceInfo(pCounterResource, counterInfo)) {
+                    if (counterInfo.d3d12Desc.Width >= 4) {
+                        uavInfo.hasCounter = true;
+                        uavInfo.initialCount = 0; // Default reset count to 0
+                        uavDesc.Buffer.Flags |= D3D11_BUFFER_UAV_FLAG_APPEND;
+                    } else {
+                        LOG_WARN("[UAV] CreateUnorderedAccessView: Counter buffer is smaller than 4 bytes.");
+                    }
+                }
+            }
+            uavInfo.numElements = pDesc->Buffer.NumElements;
+            uavInfo.format = uavDesc.Format;
+        } else {
+            // Default raw/typed R32 view
+            uavDesc.Format = DXGI_FORMAT_R32_UINT;
+            uavDesc.Buffer.FirstElement = 0;
+            uavDesc.Buffer.NumElements = static_cast<UINT>(resInfo.d3d12Desc.Width / 4);
+            uavDesc.Buffer.Flags = 0;
+            uavInfo.numElements = uavDesc.Buffer.NumElements;
+            uavInfo.format = DXGI_FORMAT_R32_UINT;
         }
+
+        HRESULT hr = D3D11Backend::Instance().GetDevice()->CreateUnorderedAccessView(
+            resInfo.pD3D11Resource, &uavDesc, &pUAV);
+        if (FAILED(hr)) {
+            LOG_WARN("[UAV] ID3D11Device::CreateUnorderedAccessView failed with hr = 0x" + Logger::HResultToString(hr));
+            return;
+        }
+    } else {
+        // Texture UAV
+        D3D11Backend::Instance().GetDevice()->CreateUnorderedAccessView(
+            resInfo.pD3D11Resource, nullptr, &pUAV);
+    }
+
+    if (pUAV) {
+        uavInfo.pUAV = pUAV;
+        ResourceManager::Instance().RegisterUAVInfo(DestDescriptor.ptr, uavInfo);
+        pUAV->Release();
+    }
+
+    if (m_pReal) {
+        m_pReal->CreateUnorderedAccessView(pResource, pCounterResource, pDesc, DestDescriptor);
     }
 }
 
@@ -293,6 +725,28 @@ void STDMETHODCALLTYPE WrappedD3D12Device::CreateDepthStencilView(ID3D12Resource
 
 void STDMETHODCALLTYPE WrappedD3D12Device::CreateSampler(const D3D12_SAMPLER_DESC* pDesc, D3D12_CPU_DESCRIPTOR_HANDLE DestDescriptor) {
     if (m_pReal) m_pReal->CreateSampler(pDesc, DestDescriptor);
+    if (Config::Instance().IsD3D11TranslationEnabled() && D3D11Backend::Instance().IsInitialized() && pDesc) {
+        D3D11_SAMPLER_DESC desc11 = {};
+        desc11.Filter = static_cast<D3D11_FILTER>(pDesc->Filter);
+        desc11.AddressU = static_cast<D3D11_TEXTURE_ADDRESS_MODE>(pDesc->AddressU);
+        desc11.AddressV = static_cast<D3D11_TEXTURE_ADDRESS_MODE>(pDesc->AddressV);
+        desc11.AddressW = static_cast<D3D11_TEXTURE_ADDRESS_MODE>(pDesc->AddressW);
+        desc11.MipLODBias = pDesc->MipLODBias;
+        desc11.MaxAnisotropy = pDesc->MaxAnisotropy;
+        desc11.ComparisonFunc = static_cast<D3D11_COMPARISON_FUNC>(pDesc->ComparisonFunc);
+        desc11.BorderColor[0] = pDesc->BorderColor[0];
+        desc11.BorderColor[1] = pDesc->BorderColor[1];
+        desc11.BorderColor[2] = pDesc->BorderColor[2];
+        desc11.BorderColor[3] = pDesc->BorderColor[3];
+        desc11.MinLOD = pDesc->MinLOD;
+        desc11.MaxLOD = pDesc->MaxLOD;
+
+        ID3D11SamplerState* pSampler = nullptr;
+        if (SUCCEEDED(D3D11Backend::Instance().GetDevice()->CreateSamplerState(&desc11, &pSampler))) {
+            ResourceManager::Instance().RegisterSampler(DestDescriptor.ptr, pSampler);
+            pSampler->Release();
+        }
+    }
 }
 
 void STDMETHODCALLTYPE WrappedD3D12Device::CopyDescriptors(UINT NumDestDescriptorRanges, const D3D12_CPU_DESCRIPTOR_HANDLE* pDestDescriptorRangeStarts, const UINT* pDestDescriptorRangeSizes, UINT NumSrcDescriptorRanges, const D3D12_CPU_DESCRIPTOR_HANDLE* pSrcDescriptorRangeStarts, const UINT* pSrcDescriptorRangeSizes, D3D12_DESCRIPTOR_HEAP_TYPE DescriptorHeapsType) {
@@ -323,21 +777,33 @@ HRESULT STDMETHODCALLTYPE WrappedD3D12Device::CreateCommittedResource(const D3D1
         auto* pRes = reinterpret_cast<ID3D12Resource*>(*ppvResource);
         ResourceStateTracker::Instance().RegisterResource(pRes, InitialResourceState);
 
-        if (Config::Instance().IsD3D11TranslationEnabled() && D3D11Backend::Instance().IsInitialized()) {
-            ID3D11Resource* pD3D11Res = nullptr;
-            if (effectiveDesc->Dimension == D3D12_RESOURCE_DIMENSION_BUFFER) {
-                ID3D11Buffer* pBuf = nullptr;
-                if (SUCCEEDED(D3D11Backend::Instance().CreateTranslatedBuffer(effectiveDesc, pHeapProperties, &pBuf))) {
-                    pD3D11Res = pBuf;
-                }
-            } else if (effectiveDesc->Dimension == D3D12_RESOURCE_DIMENSION_TEXTURE2D) {
-                ID3D11Texture2D* pTex = nullptr;
-                if (SUCCEEDED(D3D11Backend::Instance().CreateTranslatedTexture2D(effectiveDesc, pHeapProperties, &pTex))) {
-                    pD3D11Res = pTex;
-                }
+        if (Config::Instance().IsD3D11TranslationEnabled()) {
+            if (!D3D11Backend::Instance().IsInitialized()) {
+                IDXGIAdapter* pAdapter = D3D11Backend::GetMatchingAdapter(m_pReal);
+                D3D11Backend::Instance().Initialize(pAdapter);
+                if (pAdapter) pAdapter->Release();
             }
-            ResourceManager::Instance().RegisterResource(pRes, *effectiveDesc, pHeapProperties, pD3D11Res);
-            if (pD3D11Res) pD3D11Res->Release();
+            if (D3D11Backend::Instance().IsInitialized()) {
+                ID3D11Resource* pD3D11Res = nullptr;
+                if (effectiveDesc->Dimension == D3D12_RESOURCE_DIMENSION_BUFFER) {
+                    ID3D11Buffer* pBuf = nullptr;
+                    if (SUCCEEDED(D3D11Backend::Instance().CreateTranslatedBuffer(effectiveDesc, pHeapProperties, &pBuf))) {
+                        pD3D11Res = pBuf;
+                    }
+                    D3D12_GPU_VIRTUAL_ADDRESS gpuVA = pRes->GetGPUVirtualAddress();
+                    if (gpuVA != 0) {
+                        ResourceManager::Instance().RegisterBufferGPUVA(pRes, gpuVA);
+                    }
+                } else if (effectiveDesc->Dimension == D3D12_RESOURCE_DIMENSION_TEXTURE2D) {
+                    ID3D11Texture2D* pTex = nullptr;
+                    if (SUCCEEDED(D3D11Backend::Instance().CreateTranslatedTexture2D(effectiveDesc, pHeapProperties, &pTex))) {
+                        pD3D11Res = pTex;
+                    }
+                }
+                D3D12_GPU_VIRTUAL_ADDRESS va = (effectiveDesc->Dimension == D3D12_RESOURCE_DIMENSION_BUFFER) ? pRes->GetGPUVirtualAddress() : 0;
+                ResourceManager::Instance().RegisterResource(pRes, *effectiveDesc, pHeapProperties, pD3D11Res, va);
+                if (pD3D11Res) pD3D11Res->Release();
+            }
         }
     }
     return hr;
@@ -388,6 +854,8 @@ HRESULT STDMETHODCALLTYPE WrappedD3D12Device::Evict(UINT NumObjects, ID3D12Pagea
 }
 
 HRESULT STDMETHODCALLTYPE WrappedD3D12Device::CreateFence(UINT64 InitialValue, D3D12_FENCE_FLAGS Flags, REFIID riid, void** ppFence) {
+    if (!ppFence) return E_POINTER;
+    *ppFence = nullptr;
     return m_pReal ? m_pReal->CreateFence(InitialValue, Flags, riid, ppFence) : E_FAIL;
 }
 

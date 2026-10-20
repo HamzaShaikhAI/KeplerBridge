@@ -76,7 +76,7 @@ int main() {
         for (UINT i = 0; pFactory->EnumAdapters1(i, &pAdapter) != DXGI_ERROR_NOT_FOUND; ++i) {
             DXGI_ADAPTER_DESC1 desc;
             pAdapter->GetDesc1(&desc);
-            std::wcout << L"[HARDWARE] Detected Adapter " << i << L": " << desc.Description 
+            std::wcout << L"[HARDWARE] Detected Adapter " << i << L": " << desc.Description
                        << L" (" << (desc.DedicatedVideoMemory / (1024*1024)) << L" MB VRAM)\n";
             if (wcsstr(desc.Description, L"GeForce") != nullptr) {
                 break;

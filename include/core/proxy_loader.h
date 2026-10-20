@@ -38,7 +38,7 @@ public:
 
     bool Initialize(HMODULE ourModule);
     bool EnsureInitialized();
-    void Shutdown();
+    void Shutdown(bool isProcessDetach = false);
 
     bool IsLoaded() const { return m_hRealD3D12 != nullptr; }
 
@@ -100,4 +100,8 @@ extern "C" {
     void    WINAPI D3D12PIXReportCounter(void* pCounter, UINT64 value);
     UINT    WINAPI GetBehaviorValue(UINT feature);
     HRESULT WINAPI SetAppCompatStringPointer(UINT index, PCWSTR str);
+
+    // Diagnostics & Proof Exports
+    HRESULT WINAPI KeplerBridge_ReadbackRenderTarget(ID3D12Resource* pResource, void* pOutPixels, UINT* pOutWidth, UINT* pOutHeight);
+    HRESULT WINAPI KeplerBridge_ReadbackBuffer(ID3D12Resource* pResource, void* pOutData, SIZE_T numBytes);
 }

@@ -18,3 +18,10 @@ EXPORTS
     D3D12SerializeVersionedRootSignature
     GetBehaviorValue
     SetAppCompatStringPointer
+    KeplerBridge_ReadbackRenderTarget
+    KeplerBridge_ReadbackBuffer
+    KeplerBridge_CreateSwapChainForHwnd
+    KeplerBridge_PresentSwapChain
+    KeplerBridge_GetTranslationStats
+    KeplerBridge_CreateDXGISwapChainForHwnd
+    KeplerBridge_CreateDXGISwapChain

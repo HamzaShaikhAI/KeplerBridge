@@ -1,5 +1,35 @@
+# Build and compilation outputs
 build/
 audit_build/
+bin/
+obj/
+*.o
+*.obj
+*.exe
+*.dll
+*.lib
+*.a
+*.exp
+*.pdb
+*.ilk
+
+# IDE and Editor configurations
+.vs/
+.vscode/
+.idea/
+
+# Runtime caches and diagnostics
+kepler_cache/
 *.log
 *.tmp
-.vs/
+*.bak
+
+# Distribution artifacts (managed as GitHub release assets, not in repo history)
+dist/
+dist_staging/
+
+# Local game dumps, crash reports, and save data
+Saved/
+*.d3d12cache
+*.rec
+*.dmp

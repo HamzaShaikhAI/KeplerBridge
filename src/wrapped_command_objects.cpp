@@ -1,5 +1,6 @@
 #include "translator/wrapped_command_objects.h"
 #include "translator/d3d11_backend.h"
+#include "translator/resource_manager.h"
 #include "core/logger.h"
 #include "core/config.h"
 
@@ -9,13 +10,18 @@ namespace kepler {
 // WrappedD3D12CommandAllocator
 // ============================================================================
 
-WrappedD3D12CommandAllocator::WrappedD3D12CommandAllocator(ID3D12CommandAllocator* pReal, D3D12_COMMAND_LIST_TYPE type)
-    : m_pReal(pReal), m_type(type), m_refCount(1)
+WrappedD3D12CommandAllocator::WrappedD3D12CommandAllocator(ID3D12CommandAllocator* pReal, D3D12_COMMAND_LIST_TYPE type, ID3D12Device* pDevice)
+    : m_pReal(pReal), m_pDevice(pDevice), m_type(type), m_refCount(1)
 {
     if (m_pReal) m_pReal->AddRef();
+    if (m_pDevice) m_pDevice->AddRef();
 }
 
 WrappedD3D12CommandAllocator::~WrappedD3D12CommandAllocator() {
+    if (m_pDevice) {
+        m_pDevice->Release();
+        m_pDevice = nullptr;
+    }
     if (m_pReal) {
         m_pReal->Release();
         m_pReal = nullptr;
@@ -24,6 +30,7 @@ WrappedD3D12CommandAllocator::~WrappedD3D12CommandAllocator() {
 
 HRESULT STDMETHODCALLTYPE WrappedD3D12CommandAllocator::QueryInterface(REFIID riid, void** ppvObject) {
     if (!ppvObject) return E_POINTER;
+    *ppvObject = nullptr;
     if (InlineIsEqualGUID(riid, IID_IUnknown) ||
         InlineIsEqualGUID(riid, __uuidof(ID3D12Object)) ||
         InlineIsEqualGUID(riid, __uuidof(ID3D12DeviceChild)) ||
@@ -67,6 +74,11 @@ HRESULT STDMETHODCALLTYPE WrappedD3D12CommandAllocator::SetName(LPCWSTR Name) {
 }
 
 HRESULT STDMETHODCALLTYPE WrappedD3D12CommandAllocator::GetDevice(REFIID riid, void** ppvDevice) {
+    if (!ppvDevice) return E_POINTER;
+    *ppvDevice = nullptr;
+    if (m_pDevice) {
+        return m_pDevice->QueryInterface(riid, ppvDevice);
+    }
     return m_pReal ? m_pReal->GetDevice(riid, ppvDevice) : E_FAIL;
 }
 
@@ -81,14 +93,20 @@ HRESULT STDMETHODCALLTYPE WrappedD3D12CommandAllocator::Reset() {
 WrappedD3D12GraphicsCommandList::WrappedD3D12GraphicsCommandList(
     ID3D12GraphicsCommandList* pReal,
     D3D12_COMMAND_LIST_TYPE type,
-    ID3D12CommandAllocator* pAllocator)
-    : m_pReal(pReal), m_type(type), m_pCurrentAllocator(pAllocator), m_refCount(1), m_isClosed(false)
+    ID3D12CommandAllocator* pAllocator,
+    ID3D12Device* pDevice)
+    : m_pReal(pReal), m_pDevice(pDevice), m_type(type), m_pCurrentAllocator(pAllocator), m_refCount(1), m_isClosed(false)
 {
     if (m_pReal) m_pReal->AddRef();
     if (m_pCurrentAllocator) m_pCurrentAllocator->AddRef();
+    if (m_pDevice) m_pDevice->AddRef();
 }
 
 WrappedD3D12GraphicsCommandList::~WrappedD3D12GraphicsCommandList() {
+    if (m_pDevice) {
+        m_pDevice->Release();
+        m_pDevice = nullptr;
+    }
     if (m_pCurrentAllocator) {
         m_pCurrentAllocator->Release();
         m_pCurrentAllocator = nullptr;
@@ -101,6 +119,7 @@ WrappedD3D12GraphicsCommandList::~WrappedD3D12GraphicsCommandList() {
 
 HRESULT STDMETHODCALLTYPE WrappedD3D12GraphicsCommandList::QueryInterface(REFIID riid, void** ppvObject) {
     if (!ppvObject) return E_POINTER;
+    *ppvObject = nullptr;
     if (InlineIsEqualGUID(riid, IID_IUnknown) ||
         InlineIsEqualGUID(riid, __uuidof(ID3D12Object)) ||
         InlineIsEqualGUID(riid, __uuidof(ID3D12DeviceChild)) ||
@@ -110,6 +129,12 @@ HRESULT STDMETHODCALLTYPE WrappedD3D12GraphicsCommandList::QueryInterface(REFIID
         *ppvObject = static_cast<ID3D12GraphicsCommandList*>(this);
         AddRef();
         return S_OK;
+    }
+    // Block unproxied higher command list interfaces to maintain translation interception
+    if (InlineIsEqualGUID(riid, __uuidof(ID3D12GraphicsCommandList1)) ||
+        InlineIsEqualGUID(riid, __uuidof(ID3D12GraphicsCommandList2)))
+    {
+        return E_NOINTERFACE;
     }
     if (m_pReal) return m_pReal->QueryInterface(riid, ppvObject);
     return E_NOINTERFACE;
@@ -144,7 +169,16 @@ HRESULT STDMETHODCALLTYPE WrappedD3D12GraphicsCommandList::SetName(LPCWSTR Name)
 }
 
 HRESULT STDMETHODCALLTYPE WrappedD3D12GraphicsCommandList::GetDevice(REFIID riid, void** ppvDevice) {
+    if (!ppvDevice) return E_POINTER;
+    *ppvDevice = nullptr;
+    if (m_pDevice) {
+        return m_pDevice->QueryInterface(riid, ppvDevice);
+    }
     return m_pReal ? m_pReal->GetDevice(riid, ppvDevice) : E_FAIL;
+}
+
+bool WrappedD3D12GraphicsCommandList::ShouldForwardToReal() const {
+    return !Config::Instance().IsD3D11TranslationEnabled() && m_pReal != nullptr;
 }
 
 D3D12_COMMAND_LIST_TYPE STDMETHODCALLTYPE WrappedD3D12GraphicsCommandList::GetType() {
@@ -154,7 +188,7 @@ D3D12_COMMAND_LIST_TYPE STDMETHODCALLTYPE WrappedD3D12GraphicsCommandList::GetTy
 HRESULT STDMETHODCALLTYPE WrappedD3D12GraphicsCommandList::Close() {
     std::lock_guard<std::mutex> lock(m_mutex);
     m_isClosed = true;
-    if (m_pReal) return m_pReal->Close();
+    if (ShouldForwardToReal()) return m_pReal->Close();
     return S_OK;
 }
 
@@ -169,20 +203,28 @@ HRESULT STDMETHODCALLTYPE WrappedD3D12GraphicsCommandList::Reset(ID3D12CommandAl
         if (m_pCurrentAllocator) m_pCurrentAllocator->AddRef();
     }
 
-    ID3D12CommandAllocator* realAlloc = pAllocator;
-    auto* wrappedAlloc = dynamic_cast<WrappedD3D12CommandAllocator*>(pAllocator);
-    if (wrappedAlloc && wrappedAlloc->GetReal()) {
-        realAlloc = wrappedAlloc->GetReal();
+    if (pInitialState) {
+        RecordedCommand cmd;
+        cmd.type = CommandType::SetPipelineState;
+        cmd.setPSO = { pInitialState };
+        m_batch.Append(std::move(cmd));
     }
 
-    if (m_pReal) return m_pReal->Reset(realAlloc, pInitialState);
+    if (ShouldForwardToReal()) {
+        ID3D12CommandAllocator* realAlloc = pAllocator;
+        auto* wrappedAlloc = dynamic_cast<WrappedD3D12CommandAllocator*>(pAllocator);
+        if (wrappedAlloc && wrappedAlloc->GetReal()) {
+            realAlloc = wrappedAlloc->GetReal();
+        }
+        return m_pReal->Reset(realAlloc, pInitialState);
+    }
     return S_OK;
 }
 
 void STDMETHODCALLTYPE WrappedD3D12GraphicsCommandList::ClearState(ID3D12PipelineState* pPipelineState) {
     std::lock_guard<std::mutex> lock(m_mutex);
     m_batch.Clear();
-    if (m_pReal) m_pReal->ClearState(pPipelineState);
+    if (ShouldForwardToReal()) m_pReal->ClearState(pPipelineState);
 }
 
 void STDMETHODCALLTYPE WrappedD3D12GraphicsCommandList::DrawInstanced(UINT VertexCountPerInstance, UINT InstanceCount, UINT StartVertexLocation, UINT StartInstanceLocation) {
@@ -191,7 +233,7 @@ void STDMETHODCALLTYPE WrappedD3D12GraphicsCommandList::DrawInstanced(UINT Verte
     cmd.type = CommandType::DrawInstanced;
     cmd.drawInstanced = { VertexCountPerInstance, InstanceCount, StartVertexLocation, StartInstanceLocation };
     m_batch.Append(std::move(cmd));
-    if (m_pReal) m_pReal->DrawInstanced(VertexCountPerInstance, InstanceCount, StartVertexLocation, StartInstanceLocation);
+    if (ShouldForwardToReal()) m_pReal->DrawInstanced(VertexCountPerInstance, InstanceCount, StartVertexLocation, StartInstanceLocation);
 }
 
 void STDMETHODCALLTYPE WrappedD3D12GraphicsCommandList::DrawIndexedInstanced(UINT IndexCountPerInstance, UINT InstanceCount, UINT StartIndexLocation, INT BaseVertexLocation, UINT StartInstanceLocation) {
@@ -200,7 +242,7 @@ void STDMETHODCALLTYPE WrappedD3D12GraphicsCommandList::DrawIndexedInstanced(UIN
     cmd.type = CommandType::DrawIndexedInstanced;
     cmd.drawIndexed = { IndexCountPerInstance, InstanceCount, StartIndexLocation, BaseVertexLocation, StartInstanceLocation };
     m_batch.Append(std::move(cmd));
-    if (m_pReal) m_pReal->DrawIndexedInstanced(IndexCountPerInstance, InstanceCount, StartIndexLocation, BaseVertexLocation, StartInstanceLocation);
+    if (ShouldForwardToReal()) m_pReal->DrawIndexedInstanced(IndexCountPerInstance, InstanceCount, StartIndexLocation, BaseVertexLocation, StartInstanceLocation);
 }
 
 void STDMETHODCALLTYPE WrappedD3D12GraphicsCommandList::Dispatch(UINT ThreadGroupCountX, UINT ThreadGroupCountY, UINT ThreadGroupCountZ) {
@@ -209,7 +251,7 @@ void STDMETHODCALLTYPE WrappedD3D12GraphicsCommandList::Dispatch(UINT ThreadGrou
     cmd.type = CommandType::Dispatch;
     cmd.dispatch = { ThreadGroupCountX, ThreadGroupCountY, ThreadGroupCountZ };
     m_batch.Append(std::move(cmd));
-    if (m_pReal) m_pReal->Dispatch(ThreadGroupCountX, ThreadGroupCountY, ThreadGroupCountZ);
+    if (ShouldForwardToReal()) m_pReal->Dispatch(ThreadGroupCountX, ThreadGroupCountY, ThreadGroupCountZ);
 }
 
 void STDMETHODCALLTYPE WrappedD3D12GraphicsCommandList::CopyBufferRegion(ID3D12Resource* pDstBuffer, UINT64 DstOffset, ID3D12Resource* pSrcBuffer, UINT64 SrcOffset, UINT64 NumBytes) {
@@ -218,11 +260,11 @@ void STDMETHODCALLTYPE WrappedD3D12GraphicsCommandList::CopyBufferRegion(ID3D12R
     cmd.type = CommandType::CopyBufferRegion;
     cmd.copyBuffer = { pDstBuffer, DstOffset, pSrcBuffer, SrcOffset, NumBytes };
     m_batch.Append(std::move(cmd));
-    if (m_pReal) m_pReal->CopyBufferRegion(pDstBuffer, DstOffset, pSrcBuffer, SrcOffset, NumBytes);
+    if (ShouldForwardToReal()) m_pReal->CopyBufferRegion(pDstBuffer, DstOffset, pSrcBuffer, SrcOffset, NumBytes);
 }
 
 void STDMETHODCALLTYPE WrappedD3D12GraphicsCommandList::CopyTextureRegion(const D3D12_TEXTURE_COPY_LOCATION* pDst, UINT DstX, UINT DstY, UINT DstZ, const D3D12_TEXTURE_COPY_LOCATION* pSrc, const D3D12_BOX* pSrcBox) {
-    if (m_pReal) m_pReal->CopyTextureRegion(pDst, DstX, DstY, DstZ, pSrc, pSrcBox);
+    if (ShouldForwardToReal()) m_pReal->CopyTextureRegion(pDst, DstX, DstY, DstZ, pSrc, pSrcBox);
 }
 
 void STDMETHODCALLTYPE WrappedD3D12GraphicsCommandList::CopyResource(ID3D12Resource* pDstResource, ID3D12Resource* pSrcResource) {
@@ -231,15 +273,15 @@ void STDMETHODCALLTYPE WrappedD3D12GraphicsCommandList::CopyResource(ID3D12Resou
     cmd.type = CommandType::CopyResource;
     cmd.copyResource = { pDstResource, pSrcResource };
     m_batch.Append(std::move(cmd));
-    if (m_pReal) m_pReal->CopyResource(pDstResource, pSrcResource);
+    if (ShouldForwardToReal()) m_pReal->CopyResource(pDstResource, pSrcResource);
 }
 
 void STDMETHODCALLTYPE WrappedD3D12GraphicsCommandList::CopyTiles(ID3D12Resource* pTiledResource, const D3D12_TILED_RESOURCE_COORDINATE* pTileRegionStartCoordinate, const D3D12_TILE_REGION_SIZE* pTileRegionSize, ID3D12Resource* pBuffer, UINT64 BufferOffset, D3D12_TILE_COPY_FLAGS Flags) {
-    if (m_pReal) m_pReal->CopyTiles(pTiledResource, pTileRegionStartCoordinate, pTileRegionSize, pBuffer, BufferOffset, Flags);
+    if (ShouldForwardToReal()) m_pReal->CopyTiles(pTiledResource, pTileRegionStartCoordinate, pTileRegionSize, pBuffer, BufferOffset, Flags);
 }
 
 void STDMETHODCALLTYPE WrappedD3D12GraphicsCommandList::ResolveSubresource(ID3D12Resource* pDstResource, UINT DstSubresource, ID3D12Resource* pSrcResource, UINT SrcSubresource, DXGI_FORMAT Format) {
-    if (m_pReal) m_pReal->ResolveSubresource(pDstResource, DstSubresource, pSrcResource, SrcSubresource, Format);
+    if (ShouldForwardToReal()) m_pReal->ResolveSubresource(pDstResource, DstSubresource, pSrcResource, SrcSubresource, Format);
 }
 
 void STDMETHODCALLTYPE WrappedD3D12GraphicsCommandList::IASetPrimitiveTopology(D3D12_PRIMITIVE_TOPOLOGY PrimitiveTopology) {
@@ -248,7 +290,7 @@ void STDMETHODCALLTYPE WrappedD3D12GraphicsCommandList::IASetPrimitiveTopology(D
     cmd.type = CommandType::IASetPrimitiveTopology;
     cmd.setTopology = { PrimitiveTopology };
     m_batch.Append(std::move(cmd));
-    if (m_pReal) m_pReal->IASetPrimitiveTopology(PrimitiveTopology);
+    if (ShouldForwardToReal()) m_pReal->IASetPrimitiveTopology(PrimitiveTopology);
 }
 
 void STDMETHODCALLTYPE WrappedD3D12GraphicsCommandList::RSSetViewports(UINT NumViewports, const D3D12_VIEWPORT* pViewports) {
@@ -260,7 +302,7 @@ void STDMETHODCALLTYPE WrappedD3D12GraphicsCommandList::RSSetViewports(UINT NumV
         cmd.setViewports.viewports.assign(pViewports, pViewports + NumViewports);
     }
     m_batch.Append(std::move(cmd));
-    if (m_pReal) m_pReal->RSSetViewports(NumViewports, pViewports);
+    if (ShouldForwardToReal()) m_pReal->RSSetViewports(NumViewports, pViewports);
 }
 
 void STDMETHODCALLTYPE WrappedD3D12GraphicsCommandList::RSSetScissorRects(UINT NumRects, const D3D12_RECT* pRects) {
@@ -272,15 +314,15 @@ void STDMETHODCALLTYPE WrappedD3D12GraphicsCommandList::RSSetScissorRects(UINT N
         cmd.setScissors.rects.assign(pRects, pRects + NumRects);
     }
     m_batch.Append(std::move(cmd));
-    if (m_pReal) m_pReal->RSSetScissorRects(NumRects, pRects);
+    if (ShouldForwardToReal()) m_pReal->RSSetScissorRects(NumRects, pRects);
 }
 
 void STDMETHODCALLTYPE WrappedD3D12GraphicsCommandList::OMSetBlendFactor(const FLOAT BlendFactor[4]) {
-    if (m_pReal) m_pReal->OMSetBlendFactor(BlendFactor);
+    if (ShouldForwardToReal()) m_pReal->OMSetBlendFactor(BlendFactor);
 }
 
 void STDMETHODCALLTYPE WrappedD3D12GraphicsCommandList::OMSetStencilRef(UINT StencilRef) {
-    if (m_pReal) m_pReal->OMSetStencilRef(StencilRef);
+    if (ShouldForwardToReal()) m_pReal->OMSetStencilRef(StencilRef);
 }
 
 void STDMETHODCALLTYPE WrappedD3D12GraphicsCommandList::SetPipelineState(ID3D12PipelineState* pPipelineState) {
@@ -289,7 +331,7 @@ void STDMETHODCALLTYPE WrappedD3D12GraphicsCommandList::SetPipelineState(ID3D12P
     cmd.type = CommandType::SetPipelineState;
     cmd.setPSO = { pPipelineState };
     m_batch.Append(std::move(cmd));
-    if (m_pReal) m_pReal->SetPipelineState(pPipelineState);
+    if (ShouldForwardToReal()) m_pReal->SetPipelineState(pPipelineState);
 }
 
 void STDMETHODCALLTYPE WrappedD3D12GraphicsCommandList::ResourceBarrier(UINT NumBarriers, const D3D12_RESOURCE_BARRIER* pBarriers) {
@@ -318,15 +360,15 @@ void STDMETHODCALLTYPE WrappedD3D12GraphicsCommandList::ResourceBarrier(UINT Num
         }
     }
     m_batch.Append(std::move(cmd));
-    if (m_pReal) m_pReal->ResourceBarrier(NumBarriers, pBarriers);
+    if (ShouldForwardToReal()) m_pReal->ResourceBarrier(NumBarriers, pBarriers);
 }
 
 void STDMETHODCALLTYPE WrappedD3D12GraphicsCommandList::ExecuteBundle(ID3D12GraphicsCommandList* pCommandList) {
-    if (m_pReal) m_pReal->ExecuteBundle(pCommandList);
+    if (ShouldForwardToReal()) m_pReal->ExecuteBundle(pCommandList);
 }
 
 void STDMETHODCALLTYPE WrappedD3D12GraphicsCommandList::SetDescriptorHeaps(UINT NumDescriptorHeaps, ID3D12DescriptorHeap* const* ppDescriptorHeaps) {
-    if (m_pReal) m_pReal->SetDescriptorHeaps(NumDescriptorHeaps, ppDescriptorHeaps);
+    if (ShouldForwardToReal()) m_pReal->SetDescriptorHeaps(NumDescriptorHeaps, ppDescriptorHeaps);
 }
 
 void STDMETHODCALLTYPE WrappedD3D12GraphicsCommandList::SetComputeRootSignature(ID3D12RootSignature* pRootSignature) {
@@ -335,7 +377,7 @@ void STDMETHODCALLTYPE WrappedD3D12GraphicsCommandList::SetComputeRootSignature(
     cmd.type = CommandType::SetComputeRootSignature;
     cmd.setRootSig = { pRootSignature, true };
     m_batch.Append(std::move(cmd));
-    if (m_pReal) m_pReal->SetComputeRootSignature(pRootSignature);
+    if (ShouldForwardToReal()) m_pReal->SetComputeRootSignature(pRootSignature);
 }
 
 void STDMETHODCALLTYPE WrappedD3D12GraphicsCommandList::SetGraphicsRootSignature(ID3D12RootSignature* pRootSignature) {
@@ -344,7 +386,7 @@ void STDMETHODCALLTYPE WrappedD3D12GraphicsCommandList::SetGraphicsRootSignature
     cmd.type = CommandType::SetGraphicsRootSignature;
     cmd.setRootSig = { pRootSignature, false };
     m_batch.Append(std::move(cmd));
-    if (m_pReal) m_pReal->SetGraphicsRootSignature(pRootSignature);
+    if (ShouldForwardToReal()) m_pReal->SetGraphicsRootSignature(pRootSignature);
 }
 
 void STDMETHODCALLTYPE WrappedD3D12GraphicsCommandList::SetComputeRootDescriptorTable(UINT RootParameterIndex, D3D12_GPU_DESCRIPTOR_HANDLE BaseDescriptor) {
@@ -353,7 +395,7 @@ void STDMETHODCALLTYPE WrappedD3D12GraphicsCommandList::SetComputeRootDescriptor
     cmd.type = CommandType::SetComputeRootDescriptorTable;
     cmd.setRootTable = { RootParameterIndex, BaseDescriptor, true };
     m_batch.Append(std::move(cmd));
-    if (m_pReal) m_pReal->SetComputeRootDescriptorTable(RootParameterIndex, BaseDescriptor);
+    if (ShouldForwardToReal()) m_pReal->SetComputeRootDescriptorTable(RootParameterIndex, BaseDescriptor);
 }
 
 void STDMETHODCALLTYPE WrappedD3D12GraphicsCommandList::SetGraphicsRootDescriptorTable(UINT RootParameterIndex, D3D12_GPU_DESCRIPTOR_HANDLE BaseDescriptor) {
@@ -362,7 +404,7 @@ void STDMETHODCALLTYPE WrappedD3D12GraphicsCommandList::SetGraphicsRootDescripto
     cmd.type = CommandType::SetGraphicsRootDescriptorTable;
     cmd.setRootTable = { RootParameterIndex, BaseDescriptor, false };
     m_batch.Append(std::move(cmd));
-    if (m_pReal) m_pReal->SetGraphicsRootDescriptorTable(RootParameterIndex, BaseDescriptor);
+    if (ShouldForwardToReal()) m_pReal->SetGraphicsRootDescriptorTable(RootParameterIndex, BaseDescriptor);
 }
 
 void STDMETHODCALLTYPE WrappedD3D12GraphicsCommandList::SetComputeRoot32BitConstant(UINT RootParameterIndex, UINT SrcData, UINT DestOffsetIn32BitValues) {
@@ -387,7 +429,7 @@ void STDMETHODCALLTYPE WrappedD3D12GraphicsCommandList::SetComputeRoot32BitConst
         cmd.setRootConstants.constants.assign(ptr, ptr + Num32BitValuesToSet);
     }
     m_batch.Append(std::move(cmd));
-    if (m_pReal) m_pReal->SetComputeRoot32BitConstants(RootParameterIndex, Num32BitValuesToSet, pSrcData, DestOffsetIn32BitValues);
+    if (ShouldForwardToReal()) m_pReal->SetComputeRoot32BitConstants(RootParameterIndex, Num32BitValuesToSet, pSrcData, DestOffsetIn32BitValues);
 }
 
 void STDMETHODCALLTYPE WrappedD3D12GraphicsCommandList::SetGraphicsRoot32BitConstants(UINT RootParameterIndex, UINT Num32BitValuesToSet, const void* pSrcData, UINT DestOffsetIn32BitValues) {
@@ -404,31 +446,31 @@ void STDMETHODCALLTYPE WrappedD3D12GraphicsCommandList::SetGraphicsRoot32BitCons
         cmd.setRootConstants.constants.assign(ptr, ptr + Num32BitValuesToSet);
     }
     m_batch.Append(std::move(cmd));
-    if (m_pReal) m_pReal->SetGraphicsRoot32BitConstants(RootParameterIndex, Num32BitValuesToSet, pSrcData, DestOffsetIn32BitValues);
+    if (ShouldForwardToReal()) m_pReal->SetGraphicsRoot32BitConstants(RootParameterIndex, Num32BitValuesToSet, pSrcData, DestOffsetIn32BitValues);
 }
 
 void STDMETHODCALLTYPE WrappedD3D12GraphicsCommandList::SetComputeRootConstantBufferView(UINT RootParameterIndex, D3D12_GPU_VIRTUAL_ADDRESS BufferLocation) {
-    if (m_pReal) m_pReal->SetComputeRootConstantBufferView(RootParameterIndex, BufferLocation);
+    if (ShouldForwardToReal()) m_pReal->SetComputeRootConstantBufferView(RootParameterIndex, BufferLocation);
 }
 
 void STDMETHODCALLTYPE WrappedD3D12GraphicsCommandList::SetGraphicsRootConstantBufferView(UINT RootParameterIndex, D3D12_GPU_VIRTUAL_ADDRESS BufferLocation) {
-    if (m_pReal) m_pReal->SetGraphicsRootConstantBufferView(RootParameterIndex, BufferLocation);
+    if (ShouldForwardToReal()) m_pReal->SetGraphicsRootConstantBufferView(RootParameterIndex, BufferLocation);
 }
 
 void STDMETHODCALLTYPE WrappedD3D12GraphicsCommandList::SetComputeRootShaderResourceView(UINT RootParameterIndex, D3D12_GPU_VIRTUAL_ADDRESS BufferLocation) {
-    if (m_pReal) m_pReal->SetComputeRootShaderResourceView(RootParameterIndex, BufferLocation);
+    if (ShouldForwardToReal()) m_pReal->SetComputeRootShaderResourceView(RootParameterIndex, BufferLocation);
 }
 
 void STDMETHODCALLTYPE WrappedD3D12GraphicsCommandList::SetGraphicsRootShaderResourceView(UINT RootParameterIndex, D3D12_GPU_VIRTUAL_ADDRESS BufferLocation) {
-    if (m_pReal) m_pReal->SetGraphicsRootShaderResourceView(RootParameterIndex, BufferLocation);
+    if (ShouldForwardToReal()) m_pReal->SetGraphicsRootShaderResourceView(RootParameterIndex, BufferLocation);
 }
 
 void STDMETHODCALLTYPE WrappedD3D12GraphicsCommandList::SetComputeRootUnorderedAccessView(UINT RootParameterIndex, D3D12_GPU_VIRTUAL_ADDRESS BufferLocation) {
-    if (m_pReal) m_pReal->SetComputeRootUnorderedAccessView(RootParameterIndex, BufferLocation);
+    if (ShouldForwardToReal()) m_pReal->SetComputeRootUnorderedAccessView(RootParameterIndex, BufferLocation);
 }
 
 void STDMETHODCALLTYPE WrappedD3D12GraphicsCommandList::SetGraphicsRootUnorderedAccessView(UINT RootParameterIndex, D3D12_GPU_VIRTUAL_ADDRESS BufferLocation) {
-    if (m_pReal) m_pReal->SetGraphicsRootUnorderedAccessView(RootParameterIndex, BufferLocation);
+    if (ShouldForwardToReal()) m_pReal->SetGraphicsRootUnorderedAccessView(RootParameterIndex, BufferLocation);
 }
 
 void STDMETHODCALLTYPE WrappedD3D12GraphicsCommandList::IASetIndexBuffer(const D3D12_INDEX_BUFFER_VIEW* pView) {
@@ -436,10 +478,16 @@ void STDMETHODCALLTYPE WrappedD3D12GraphicsCommandList::IASetIndexBuffer(const D
     if (pView) {
         RecordedCommand cmd;
         cmd.type = CommandType::IASetIndexBuffer;
-        cmd.setIB = { nullptr, pView->BufferLocation, pView->SizeInBytes, pView->Format };
+        UINT64 offset = 0;
+        TranslatedResourceInfo info;
+        ID3D12Resource* pRes = nullptr;
+        if (ResourceManager::Instance().FindBufferByGPUVA(pView->BufferLocation, info, offset)) {
+            pRes = info.pD3D12Resource;
+        }
+        cmd.setIB = { pRes, offset, pView->SizeInBytes, pView->Format };
         m_batch.Append(std::move(cmd));
     }
-    if (m_pReal) m_pReal->IASetIndexBuffer(pView);
+    if (ShouldForwardToReal()) m_pReal->IASetIndexBuffer(pView);
 }
 
 void STDMETHODCALLTYPE WrappedD3D12GraphicsCommandList::IASetVertexBuffers(UINT StartSlot, UINT NumViews, const D3D12_VERTEX_BUFFER_VIEW* pViews) {
@@ -450,16 +498,22 @@ void STDMETHODCALLTYPE WrappedD3D12GraphicsCommandList::IASetVertexBuffers(UINT 
     cmd.setVBs.startSlot = StartSlot;
     if (pViews && NumViews > 0) {
         for (UINT i = 0; i < NumViews; ++i) {
-            VertexBufferBinding vb = { nullptr, pViews[i].BufferLocation, pViews[i].StrideInBytes, pViews[i].SizeInBytes };
+            UINT64 offset = 0;
+            TranslatedResourceInfo info;
+            ID3D12Resource* pRes = nullptr;
+            if (ResourceManager::Instance().FindBufferByGPUVA(pViews[i].BufferLocation, info, offset)) {
+                pRes = info.pD3D12Resource;
+            }
+            VertexBufferBinding vb = { pRes, offset, pViews[i].StrideInBytes, pViews[i].SizeInBytes };
             cmd.setVBs.views.push_back(vb);
         }
     }
     m_batch.Append(std::move(cmd));
-    if (m_pReal) m_pReal->IASetVertexBuffers(StartSlot, NumViews, pViews);
+    if (ShouldForwardToReal()) m_pReal->IASetVertexBuffers(StartSlot, NumViews, pViews);
 }
 
 void STDMETHODCALLTYPE WrappedD3D12GraphicsCommandList::SOSetTargets(UINT StartSlot, UINT NumViews, const D3D12_STREAM_OUTPUT_BUFFER_VIEW* pViews) {
-    if (m_pReal) m_pReal->SOSetTargets(StartSlot, NumViews, pViews);
+    if (ShouldForwardToReal()) m_pReal->SOSetTargets(StartSlot, NumViews, pViews);
 }
 
 void STDMETHODCALLTYPE WrappedD3D12GraphicsCommandList::OMSetRenderTargets(UINT NumRenderTargetDescriptors, const D3D12_CPU_DESCRIPTOR_HANDLE* pRenderTargetDescriptors, WINBOOL RTsSingleHandleToDescriptorRange, const D3D12_CPU_DESCRIPTOR_HANDLE* pDepthStencilDescriptor) {
@@ -475,7 +529,7 @@ void STDMETHODCALLTYPE WrappedD3D12GraphicsCommandList::OMSetRenderTargets(UINT 
         cmd.setRTVs.dsvHandle = *pDepthStencilDescriptor;
     }
     m_batch.Append(std::move(cmd));
-    if (m_pReal) m_pReal->OMSetRenderTargets(NumRenderTargetDescriptors, pRenderTargetDescriptors, RTsSingleHandleToDescriptorRange, pDepthStencilDescriptor);
+    if (ShouldForwardToReal()) m_pReal->OMSetRenderTargets(NumRenderTargetDescriptors, pRenderTargetDescriptors, RTsSingleHandleToDescriptorRange, pDepthStencilDescriptor);
 }
 
 void STDMETHODCALLTYPE WrappedD3D12GraphicsCommandList::ClearDepthStencilView(D3D12_CPU_DESCRIPTOR_HANDLE DepthStencilView, D3D12_CLEAR_FLAGS ClearFlags, FLOAT Depth, UINT8 Stencil, UINT NumRects, const D3D12_RECT* pRects) {
@@ -491,7 +545,7 @@ void STDMETHODCALLTYPE WrappedD3D12GraphicsCommandList::ClearDepthStencilView(D3
         cmd.clearDSV.rects.assign(pRects, pRects + NumRects);
     }
     m_batch.Append(std::move(cmd));
-    if (m_pReal) m_pReal->ClearDepthStencilView(DepthStencilView, ClearFlags, Depth, Stencil, NumRects, pRects);
+    if (ShouldForwardToReal()) m_pReal->ClearDepthStencilView(DepthStencilView, ClearFlags, Depth, Stencil, NumRects, pRects);
 }
 
 void STDMETHODCALLTYPE WrappedD3D12GraphicsCommandList::ClearRenderTargetView(D3D12_CPU_DESCRIPTOR_HANDLE RenderTargetView, const FLOAT ColorRGBA[4], UINT NumRects, const D3D12_RECT* pRects) {
@@ -510,65 +564,70 @@ void STDMETHODCALLTYPE WrappedD3D12GraphicsCommandList::ClearRenderTargetView(D3
         cmd.clearRTV.rects.assign(pRects, pRects + NumRects);
     }
     m_batch.Append(std::move(cmd));
-    if (m_pReal) m_pReal->ClearRenderTargetView(RenderTargetView, ColorRGBA, NumRects, pRects);
+    if (ShouldForwardToReal()) m_pReal->ClearRenderTargetView(RenderTargetView, ColorRGBA, NumRects, pRects);
 }
 
 void STDMETHODCALLTYPE WrappedD3D12GraphicsCommandList::ClearUnorderedAccessViewUint(D3D12_GPU_DESCRIPTOR_HANDLE ViewGPUHandleInCurrentHeap, D3D12_CPU_DESCRIPTOR_HANDLE ViewCPUHandle, ID3D12Resource* pResource, const UINT Values[4], UINT NumRects, const D3D12_RECT* pRects) {
-    if (m_pReal) m_pReal->ClearUnorderedAccessViewUint(ViewGPUHandleInCurrentHeap, ViewCPUHandle, pResource, Values, NumRects, pRects);
+    if (ShouldForwardToReal()) m_pReal->ClearUnorderedAccessViewUint(ViewGPUHandleInCurrentHeap, ViewCPUHandle, pResource, Values, NumRects, pRects);
 }
 
 void STDMETHODCALLTYPE WrappedD3D12GraphicsCommandList::ClearUnorderedAccessViewFloat(D3D12_GPU_DESCRIPTOR_HANDLE ViewGPUHandleInCurrentHeap, D3D12_CPU_DESCRIPTOR_HANDLE ViewCPUHandle, ID3D12Resource* pResource, const FLOAT Values[4], UINT NumRects, const D3D12_RECT* pRects) {
-    if (m_pReal) m_pReal->ClearUnorderedAccessViewFloat(ViewGPUHandleInCurrentHeap, ViewCPUHandle, pResource, Values, NumRects, pRects);
+    if (ShouldForwardToReal()) m_pReal->ClearUnorderedAccessViewFloat(ViewGPUHandleInCurrentHeap, ViewCPUHandle, pResource, Values, NumRects, pRects);
 }
 
 void STDMETHODCALLTYPE WrappedD3D12GraphicsCommandList::DiscardResource(ID3D12Resource* pResource, const D3D12_DISCARD_REGION* pRegion) {
-    if (m_pReal) m_pReal->DiscardResource(pResource, pRegion);
+    if (ShouldForwardToReal()) m_pReal->DiscardResource(pResource, pRegion);
 }
 
 void STDMETHODCALLTYPE WrappedD3D12GraphicsCommandList::BeginQuery(ID3D12QueryHeap* pQueryHeap, D3D12_QUERY_TYPE Type, UINT Index) {
-    if (m_pReal) m_pReal->BeginQuery(pQueryHeap, Type, Index);
+    if (ShouldForwardToReal()) m_pReal->BeginQuery(pQueryHeap, Type, Index);
 }
 
 void STDMETHODCALLTYPE WrappedD3D12GraphicsCommandList::EndQuery(ID3D12QueryHeap* pQueryHeap, D3D12_QUERY_TYPE Type, UINT Index) {
-    if (m_pReal) m_pReal->EndQuery(pQueryHeap, Type, Index);
+    if (ShouldForwardToReal()) m_pReal->EndQuery(pQueryHeap, Type, Index);
 }
 
 void STDMETHODCALLTYPE WrappedD3D12GraphicsCommandList::ResolveQueryData(ID3D12QueryHeap* pQueryHeap, D3D12_QUERY_TYPE Type, UINT StartIndex, UINT NumQueries, ID3D12Resource* pDestinationBuffer, UINT64 AlignedDestinationBufferOffset) {
-    if (m_pReal) m_pReal->ResolveQueryData(pQueryHeap, Type, StartIndex, NumQueries, pDestinationBuffer, AlignedDestinationBufferOffset);
+    if (ShouldForwardToReal()) m_pReal->ResolveQueryData(pQueryHeap, Type, StartIndex, NumQueries, pDestinationBuffer, AlignedDestinationBufferOffset);
 }
 
 void STDMETHODCALLTYPE WrappedD3D12GraphicsCommandList::SetPredication(ID3D12Resource* pBuffer, UINT64 AlignedBufferOffset, D3D12_PREDICATION_OP Operation) {
-    if (m_pReal) m_pReal->SetPredication(pBuffer, AlignedBufferOffset, Operation);
+    if (ShouldForwardToReal()) m_pReal->SetPredication(pBuffer, AlignedBufferOffset, Operation);
 }
 
 void STDMETHODCALLTYPE WrappedD3D12GraphicsCommandList::SetMarker(UINT Metadata, const void* pData, UINT Size) {
-    if (m_pReal) m_pReal->SetMarker(Metadata, pData, Size);
+    if (ShouldForwardToReal()) m_pReal->SetMarker(Metadata, pData, Size);
 }
 
 void STDMETHODCALLTYPE WrappedD3D12GraphicsCommandList::BeginEvent(UINT Metadata, const void* pData, UINT Size) {
-    if (m_pReal) m_pReal->BeginEvent(Metadata, pData, Size);
+    if (ShouldForwardToReal()) m_pReal->BeginEvent(Metadata, pData, Size);
 }
 
 void STDMETHODCALLTYPE WrappedD3D12GraphicsCommandList::EndEvent() {
-    if (m_pReal) m_pReal->EndEvent();
+    if (ShouldForwardToReal()) m_pReal->EndEvent();
 }
 
 void STDMETHODCALLTYPE WrappedD3D12GraphicsCommandList::ExecuteIndirect(ID3D12CommandSignature* pCommandSignature, UINT MaxCommandCount, ID3D12Resource* pArgumentBuffer, UINT64 ArgumentBufferOffset, ID3D12Resource* pCountBuffer, UINT64 CountBufferOffset) {
-    if (m_pReal) m_pReal->ExecuteIndirect(pCommandSignature, MaxCommandCount, pArgumentBuffer, ArgumentBufferOffset, pCountBuffer, CountBufferOffset);
+    if (ShouldForwardToReal()) m_pReal->ExecuteIndirect(pCommandSignature, MaxCommandCount, pArgumentBuffer, ArgumentBufferOffset, pCountBuffer, CountBufferOffset);
 }
 
 // ============================================================================
 // WrappedD3D12CommandQueue
 // ============================================================================
 
-WrappedD3D12CommandQueue::WrappedD3D12CommandQueue(ID3D12CommandQueue* pReal, const D3D12_COMMAND_QUEUE_DESC* pDesc)
-    : m_pReal(pReal), m_refCount(1)
+WrappedD3D12CommandQueue::WrappedD3D12CommandQueue(ID3D12CommandQueue* pReal, const D3D12_COMMAND_QUEUE_DESC* pDesc, ID3D12Device* pDevice)
+    : m_pReal(pReal), m_pDevice(pDevice), m_refCount(1)
 {
     if (m_pReal) m_pReal->AddRef();
+    if (m_pDevice) m_pDevice->AddRef();
     if (pDesc) m_desc = *pDesc;
 }
 
 WrappedD3D12CommandQueue::~WrappedD3D12CommandQueue() {
+    if (m_pDevice) {
+        m_pDevice->Release();
+        m_pDevice = nullptr;
+    }
     if (m_pReal) {
         m_pReal->Release();
         m_pReal = nullptr;
@@ -577,6 +636,7 @@ WrappedD3D12CommandQueue::~WrappedD3D12CommandQueue() {
 
 HRESULT STDMETHODCALLTYPE WrappedD3D12CommandQueue::QueryInterface(REFIID riid, void** ppvObject) {
     if (!ppvObject) return E_POINTER;
+    *ppvObject = nullptr;
     if (InlineIsEqualGUID(riid, IID_IUnknown) ||
         InlineIsEqualGUID(riid, __uuidof(ID3D12Object)) ||
         InlineIsEqualGUID(riid, __uuidof(ID3D12DeviceChild)) ||
@@ -620,6 +680,11 @@ HRESULT STDMETHODCALLTYPE WrappedD3D12CommandQueue::SetName(LPCWSTR Name) {
 }
 
 HRESULT STDMETHODCALLTYPE WrappedD3D12CommandQueue::GetDevice(REFIID riid, void** ppvDevice) {
+    if (!ppvDevice) return E_POINTER;
+    *ppvDevice = nullptr;
+    if (m_pDevice) {
+        return m_pDevice->QueryInterface(riid, ppvDevice);
+    }
     return m_pReal ? m_pReal->GetDevice(riid, ppvDevice) : E_FAIL;
 }
 
@@ -642,10 +707,8 @@ void STDMETHODCALLTYPE WrappedD3D12CommandQueue::ExecuteCommandLists(UINT NumCom
                 D3D11Backend::Instance().ReplayCommandBatch(wrappedList->GetCommandBatch());
             }
         }
-    }
-
-    // Pass through to native D3D12 hardware queue if present
-    if (m_pReal && ppCommandLists && NumCommandLists > 0) {
+    } else if (m_pReal && ppCommandLists && NumCommandLists > 0) {
+        // Pass through to native D3D12 hardware queue if present (when translation is disabled)
         std::vector<ID3D12CommandList*> realLists;
         realLists.reserve(NumCommandLists);
         for (UINT i = 0; i < NumCommandLists; ++i) {
@@ -673,6 +736,10 @@ void STDMETHODCALLTYPE WrappedD3D12CommandQueue::EndEvent() {
 }
 
 HRESULT STDMETHODCALLTYPE WrappedD3D12CommandQueue::Signal(ID3D12Fence* pFence, UINT64 Value) {
+    if (!pFence) return E_INVALIDARG;
+    if (Config::Instance().IsD3D11TranslationEnabled() && D3D11Backend::Instance().IsInitialized()) {
+        D3D11Backend::Instance().WaitForGpuCompletion();
+    }
     return m_pReal ? m_pReal->Signal(pFence, Value) : S_OK;
 }
 

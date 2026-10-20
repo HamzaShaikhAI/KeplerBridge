@@ -48,6 +48,12 @@ bool Config::Load(const std::string& iniFilePath) {
     m_immediateQueueFlush = GetPrivateProfileIntA("Translation", "ImmediateQueueFlush", 1, iniFilePath.c_str()) != 0;
     m_emulateQueries = GetPrivateProfileIntA("Translation", "EmulateQueries", 1, iniFilePath.c_str()) != 0;
 
+    // [Cache]
+    m_enableShaderDiskCache = GetPrivateProfileIntA("Cache", "EnableShaderDiskCache", 1, iniFilePath.c_str()) != 0;
+    char cacheDirBuf[MAX_PATH] = { 0 };
+    GetPrivateProfileStringA("Cache", "CacheDirectory", "kepler_cache/shaders", cacheDirBuf, sizeof(cacheDirBuf), iniFilePath.c_str());
+    m_shaderCacheDir = cacheDirBuf;
+
     LOG_INFO("Successfully loaded configuration from: " + iniFilePath);
     return true;
 }
@@ -69,6 +75,8 @@ void Config::LogSettings() const {
     LOG_INFO("  [Translation] EnableStateTracking: " + std::string(m_enableStateTracking ? "true" : "false"));
     LOG_INFO("  [Translation] ImmediateQueueFlush: " + std::string(m_immediateQueueFlush ? "true" : "false"));
     LOG_INFO("  [Translation] EmulateQueries: " + std::string(m_emulateQueries ? "true" : "false"));
+    LOG_INFO("  [Cache] EnableShaderDiskCache: " + std::string(m_enableShaderDiskCache ? "true" : "false"));
+    LOG_INFO("  [Cache] CacheDirectory: " + m_shaderCacheDir);
     LOG_INFO("----------------------------------");
 }
 
