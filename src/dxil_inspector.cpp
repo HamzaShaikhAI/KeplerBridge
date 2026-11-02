@@ -155,9 +155,14 @@ ShaderInspectionResult DxilInspector::InspectShader(const void* pBytecode, size_
         result.statusMessage = "Shader Model 6.x (DXIL) container detected. Unsupported natively on Kepler hardware.";
     } else if (result.hasLegacyBytecodeChunk) {
         result.containerType = ShaderContainerType::LegacyDXBC;
-        result.isSupportedOnKepler = (result.majorVersion <= 5);
-        result.statusMessage = "Legacy Shader Model " + std::to_string(result.majorVersion) + "." +
-                               std::to_string(result.minorVersion) + " (DXBC) container detected. Supported on Kepler.";
+        result.isSupportedOnKepler = (result.majorVersion < 5) || (result.majorVersion == 5 && result.minorVersion == 0);
+        if (result.isSupportedOnKepler) {
+            result.statusMessage = "Legacy Shader Model " + std::to_string(result.majorVersion) + "." +
+                                   std::to_string(result.minorVersion) + " (DXBC) container detected. Supported on Kepler.";
+        } else {
+            result.statusMessage = "Legacy Shader Model " + std::to_string(result.majorVersion) + "." +
+                                   std::to_string(result.minorVersion) + " (DXBC) container detected. Unsupported on D3D11 Kepler (requires <= SM 5.0).";
+        }
     } else {
         result.containerType = ShaderContainerType::LegacyDXBC;
         result.isSupportedOnKepler = true;

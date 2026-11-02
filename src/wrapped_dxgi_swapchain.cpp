@@ -3,14 +3,23 @@
 #include "translator/resource_manager.h"
 #include "core/logger.h"
 #include "core/config.h"
+#include "core/profile_manager.h"
 
 #include <sstream>
+#include <unordered_set>
 
 namespace kepler {
 
 // ============================================================================
-// WrappedDXGISwapChain Implementation
+// WrappedDXGISwapChain Registry & Implementation
 // ============================================================================
+
+static std::atomic<uint64_t> s_presentTokenGen{ 1 };
+
+bool WrappedDXGISwapChain::IsWrapped(IDXGISwapChain* pSwapChain) {
+    if (!pSwapChain) return false;
+    return RuntimeTelemetry::Instance().IsWrappedSwapChain(pSwapChain);
+}
 
 WrappedDXGISwapChain::WrappedDXGISwapChain(
     IDXGISwapChain* pRealSwapChain,
@@ -37,9 +46,19 @@ WrappedDXGISwapChain::WrappedDXGISwapChain(
 
     if (pDesc1) m_desc1 = *pDesc1;
     if (pFullscreenDesc) m_fullscreenDesc = *pFullscreenDesc;
+
+    RuntimeTelemetry::Instance().RegisterWrappedSwapChain(this);
+    if (m_pRealSwapChain) {
+        RuntimeTelemetry::Instance().RegisterWrappedSwapChain(m_pRealSwapChain);
+    }
 }
 
 WrappedDXGISwapChain::~WrappedDXGISwapChain() {
+    RuntimeTelemetry::Instance().UnregisterWrappedSwapChain(this);
+    if (m_pRealSwapChain) {
+        RuntimeTelemetry::Instance().UnregisterWrappedSwapChain(m_pRealSwapChain);
+    }
+
     ReleaseBackBuffers();
 
     if (m_pRealSwapChain3) {
@@ -155,9 +174,26 @@ HRESULT STDMETHODCALLTYPE WrappedDXGISwapChain::Present(UINT SyncInterval, UINT 
 
     HRESULT hr = m_pRealSwapChain ? m_pRealSwapChain->Present(SyncInterval, Flags) : E_FAIL;
 
+    uint64_t token = s_presentTokenGen.fetch_add(1, std::memory_order_relaxed);
     if (SUCCEEDED(hr)) {
         if (!m_d3d12BackBuffers.empty()) {
             m_currentBackBufferIndex = (m_currentBackBufferIndex + 1) % static_cast<UINT>(m_d3d12BackBuffers.size());
+        }
+
+        LARGE_INTEGER now, freq;
+        QueryPerformanceFrequency(&freq);
+        QueryPerformanceCounter(&now);
+        double frameTimeMs = 0.0;
+        if (m_lastPresentCounter.QuadPart > 0 && freq.QuadPart > 0) {
+            frameTimeMs = (static_cast<double>(now.QuadPart - m_lastPresentCounter.QuadPart) * 1000.0) / static_cast<double>(freq.QuadPart);
+        }
+        RuntimeTelemetry::Instance().RecordPresent(hr, frameTimeMs, this, token, Flags);
+        m_lastPresentCounter = now;
+    } else {
+        RuntimeTelemetry::Instance().RecordPresent(hr, 0.0, this, token, Flags);
+        if (hr == DXGI_ERROR_DEVICE_REMOVED || hr == DXGI_ERROR_DEVICE_HUNG || hr == DXGI_ERROR_DEVICE_RESET) {
+            RuntimeTelemetry::Instance().RecordDeviceRemoval(
+                hr, "WrappedDXGISwapChain::Present", "Device removal or hang returned from swapchain Present");
         }
     }
     return hr;
@@ -210,6 +246,15 @@ HRESULT STDMETHODCALLTYPE WrappedDXGISwapChain::ResizeBuffers(
     UINT SwapChainFlags)
 {
     std::lock_guard<std::mutex> lock(m_mutex);
+
+    // Unbind all render targets and clear pipeline state in D3D11 context before releasing backbuffers.
+    // D3D11 runtime strictly enforces zero outstanding references to swapchain buffers during ResizeBuffers.
+    if (D3D11Backend::Instance().IsInitialized() && D3D11Backend::Instance().GetContext()) {
+        ID3D11RenderTargetView* nullRTVs[8] = { nullptr };
+        D3D11Backend::Instance().GetContext()->OMSetRenderTargets(8, nullRTVs, nullptr);
+        D3D11Backend::Instance().GetContext()->ClearState();
+        D3D11Backend::Instance().GetContext()->Flush();
+    }
 
     ReleaseBackBuffers();
     D3D11Backend::Instance().Flush();
@@ -308,9 +353,26 @@ HRESULT STDMETHODCALLTYPE WrappedDXGISwapChain::Present1(
         }
     }
 
+    uint64_t token = s_presentTokenGen.fetch_add(1, std::memory_order_relaxed);
     if (SUCCEEDED(hr)) {
         if (!m_d3d12BackBuffers.empty()) {
             m_currentBackBufferIndex = (m_currentBackBufferIndex + 1) % static_cast<UINT>(m_d3d12BackBuffers.size());
+        }
+
+        LARGE_INTEGER now, freq;
+        QueryPerformanceFrequency(&freq);
+        QueryPerformanceCounter(&now);
+        double frameTimeMs = 0.0;
+        if (m_lastPresentCounter.QuadPart > 0 && freq.QuadPart > 0) {
+            frameTimeMs = (static_cast<double>(now.QuadPart - m_lastPresentCounter.QuadPart) * 1000.0) / static_cast<double>(freq.QuadPart);
+        }
+        RuntimeTelemetry::Instance().RecordPresent(hr, frameTimeMs, this, token, PresentFlags);
+        m_lastPresentCounter = now;
+    } else {
+        RuntimeTelemetry::Instance().RecordPresent(hr, 0.0, this, token, PresentFlags);
+        if (hr == DXGI_ERROR_DEVICE_REMOVED || hr == DXGI_ERROR_DEVICE_HUNG || hr == DXGI_ERROR_DEVICE_RESET) {
+            RuntimeTelemetry::Instance().RecordDeviceRemoval(
+                hr, "WrappedDXGISwapChain::Present", "Device removal or hang returned from swapchain Present");
         }
     }
     return hr;

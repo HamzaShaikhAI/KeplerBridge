@@ -1,27 +1,30 @@
 LIBRARY d3d12
 EXPORTS
-    D3D12CoreCreateLayeredDevice
-    D3D12CoreGetLayeredDeviceSize
-    D3D12CoreRegisterLayers
-    D3D12CreateDevice
-    D3D12CreateRootSignatureDeserializer
-    D3D12CreateVersionedRootSignatureDeserializer
-    D3D12DeviceRemovedExtendedData
-    D3D12EnableExperimentalFeatures
-    D3D12GetDebugInterface
-    D3D12GetInterface
-    D3D12PIXEventsReplaceBlock
-    D3D12PIXGetThreadInfo
-    D3D12PIXNotifyWakeFromFenceSignal
-    D3D12PIXReportCounter
-    D3D12SerializeRootSignature
-    D3D12SerializeVersionedRootSignature
-    GetBehaviorValue
-    SetAppCompatStringPointer
-    KeplerBridge_ReadbackRenderTarget
-    KeplerBridge_ReadbackBuffer
-    KeplerBridge_CreateSwapChainForHwnd
-    KeplerBridge_PresentSwapChain
-    KeplerBridge_GetTranslationStats
-    KeplerBridge_CreateDXGISwapChainForHwnd
-    KeplerBridge_CreateDXGISwapChain
+    SetAppCompatStringPointer                   @100
+    D3D12CreateDevice                           @101
+    D3D12GetDebugInterface                      @102
+    D3D12CoreCreateLayeredDevice                @103
+    D3D12CoreGetLayeredDeviceSize               @104
+    D3D12CoreRegisterLayers                     @105
+    D3D12CreateRootSignatureDeserializer        @106
+    D3D12CreateVersionedRootSignatureDeserializer @107
+    D3D12DeviceRemovedExtendedData              @108
+    D3D12EnableExperimentalFeatures             @109
+    D3D12GetInterface                           @110
+    D3D12PIXEventsReplaceBlock                  @111
+    D3D12PIXGetThreadInfo                       @112
+    D3D12PIXNotifyWakeFromFenceSignal           @113
+    D3D12PIXReportCounter                       @114
+    D3D12SerializeRootSignature                 @115
+    D3D12SerializeVersionedRootSignature        @116
+    GetBehaviorValue                            @117
+    KeplerBridge_ReadbackRenderTarget           @118
+    KeplerBridge_ReadbackBuffer                 @119
+    KeplerBridge_CreateSwapChainForHwnd         @120
+    KeplerBridge_PresentSwapChain               @121
+    KeplerBridge_GetTranslationStats            @122
+    KeplerBridge_CreateDXGISwapChainForHwnd     @123
+    KeplerBridge_CreateDXGISwapChain            @124
+    KeplerBridge_GetSessionMetrics              @125
+    KeplerBridge_GetCausalMetrics               @126
+    KeplerBridge_GetPresentationBreakdown       @127

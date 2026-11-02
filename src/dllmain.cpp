@@ -5,8 +5,11 @@
 
 #include "core/logger.h"
 #include "core/config.h"
+#include "core/profile_manager.h"
 #include "core/proxy_loader.h"
 #include "translator/d3d11_backend.h"
+#include "downgrader/shader_policy.h"
+#include "downgrader/bounded_shader_translator.h"
 
 #include <string>
 
@@ -56,8 +59,9 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserv
                     iniPath = altIniPath;
                 }
             }
-            kepler::Config::Instance().Load(iniPath);
-            kepler::Config::Instance().LogSettings();
+            kepler::GameProfileManager::Instance().Initialize(exePath, iniPath);
+            kepler::Config::Instance().SyncFromActivePolicy();
+            kepler::GameProfileManager::Instance().LogProfileDetails();
 
             // Hardware capability probing & banner
             std::string adapterName = "Unknown GPU";
@@ -86,17 +90,26 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserv
                 vramBytes,
                 D3D_FEATURE_LEVEL_11_0);
 
+            kepler::RuntimeTelemetry::Instance().SetModuleInfo(dllPath, "KeplerBridge-0.5-Phase12.12");
+
             // Initialize proxy loader to hook and forward to System32\d3d12.dll
             if (!kepler::ProxyLoader::Instance().Initialize(hModule)) {
                 LOG_ERROR("Failed to initialize ProxyLoader! Forwarding calls may fail.");
             } else {
                 LOG_INFO("ProxyLoader initialized successfully. System hooks active.");
             }
+
+            // Register default shader lowering translator with ShaderPolicy
+            if (!kepler::ShaderPolicy::Instance().HasActiveTranslator()) {
+                kepler::ShaderPolicy::Instance().RegisterTranslator(std::make_shared<kepler::BoundedShaderTranslator>());
+                LOG_INFO("Registered BoundedShaderTranslator with ShaderPolicy for production shader lowering.");
+            }
             break;
         }
 
         case DLL_PROCESS_DETACH: {
             LOG_INFO("DLL_PROCESS_DETACH received. Initiating graceful shutdown.");
+            kepler::RuntimeTelemetry::Instance().LogSummary();
             // Under OS loader lock in DllMain, releasing graphics driver COM objects causes
             // NVIDIA driver worker thread deadlocks. Pass isProcessDetach = true to safely teardown.
             kepler::D3D11Backend::Instance().Shutdown(true);

@@ -60,11 +60,22 @@ ShaderPolicyDecision ShaderPolicy::EvaluateShader(
         return decision;
     }
 
-    // Shader is unsupported natively (e.g. DXIL SM 6.x)
+    // Shader is unsupported natively (e.g. SM 5.1 DXBC requiring lowering, or DXIL SM 6.x)
     decision.isSupported = false;
 
-    // Check if fallback translation is enabled in configuration
-    if (!Config::Instance().IsShaderFallbackEnabled()) {
+    // Check if shader is an authentic SM 5.1 DXBC container eligible for direct bytecode lowering
+    bool isSM51DXBC = (decision.inspection.containerType == ShaderContainerType::LegacyDXBC &&
+                       decision.inspection.majorVersion == 5 && decision.inspection.minorVersion == 1);
+
+    // Direct translation is permitted if SM 5.1, or if D3D11 translation is active, or if fallback is enabled
+    bool isDXILDirectTranslation = (decision.inspection.hasDXILChunk ||
+                                    decision.inspection.containerType == ShaderContainerType::DXIL ||
+                                    decision.inspection.majorVersion >= 6) &&
+                                   Config::Instance().IsD3D11TranslationEnabled();
+
+    // Fallback translation config check: SM 5.1 & DXIL direct lowering permitted when translation enabled;
+    // legacy fallback mode requires EnableShaderFallback=1.
+    if (!isSM51DXBC && !isDXILDirectTranslation && !Config::Instance().IsShaderFallbackEnabled()) {
         decision.shouldIntercept = false;
         decision.fallbackApplied = false;
         decision.actionReason = "Unsupported shader (DXIL SM " + std::to_string(decision.inspection.majorVersion) +

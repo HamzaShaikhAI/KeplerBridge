@@ -125,7 +125,7 @@ bool TestSyntheticLegacyDXBC_VertexShader() {
     TEST_ASSERT(res.stage == ShaderStage::Vertex, "Stage must be Vertex");
     TEST_ASSERT(res.majorVersion == 5, "Major version must be 5");
     TEST_ASSERT(res.minorVersion == 1, "Minor version must be 1");
-    TEST_ASSERT(res.isSupportedOnKepler, "SM 5.1 must be supported on Kepler");
+    TEST_ASSERT(!res.isSupportedOnKepler, "SM 5.1 must be identified as unsupported on Kepler D3D11 hardware");
     TEST_ASSERT(!res.hasDXILChunk, "Must not have DXIL chunk");
     TEST_ASSERT(res.hasLegacyBytecodeChunk, "Must have legacy bytecode chunk");
     std::cout << "[PASS] TestSyntheticLegacyDXBC_VertexShader\n";
@@ -217,13 +217,21 @@ bool TestShaderPolicyEvaluation() {
     using namespace kepler;
     auto& policy = ShaderPolicy::Instance();
 
-    // 1. Valid SM 5.1 shader -> supported, no fallback needed
-    uint32_t token = (1 << 16) | (5 << 4) | 1;
-    auto validShader = CreateSyntheticDXBC(0x58454853, &token, sizeof(token));
-    auto dec1 = policy.EvaluateShader(validShader.data(), validShader.size(), ShaderStage::Vertex);
-    TEST_ASSERT(dec1.isSupported, "SM 5.1 must be supported");
-    TEST_ASSERT(!dec1.shouldIntercept, "Should not intercept natively supported shader");
-    TEST_ASSERT(!dec1.fallbackApplied, "No fallback should be applied");
+    // 1. Valid SM 5.0 shader -> supported, no fallback needed
+    uint32_t token50 = (1 << 16) | (5 << 4) | 0;
+    auto validShader50 = CreateSyntheticDXBC(0x58454853, &token50, sizeof(token50));
+    auto dec0 = policy.EvaluateShader(validShader50.data(), validShader50.size(), ShaderStage::Vertex);
+    TEST_ASSERT(dec0.isSupported, "SM 5.0 must be supported");
+    TEST_ASSERT(!dec0.shouldIntercept, "Should not intercept natively supported shader");
+    TEST_ASSERT(!dec0.fallbackApplied, "No fallback should be applied");
+
+    // 1b. SM 5.1 shader -> unsupported on Kepler D3D11, preserves native error if fallback disabled
+    uint32_t token51 = (1 << 16) | (5 << 4) | 1;
+    auto shader51 = CreateSyntheticDXBC(0x58454853, &token51, sizeof(token51));
+    auto dec1 = policy.EvaluateShader(shader51.data(), shader51.size(), ShaderStage::Vertex);
+    TEST_ASSERT(!dec1.isSupported, "SM 5.1 must be reported unsupported on Kepler D3D11");
+    TEST_ASSERT(!dec1.shouldIntercept, "Should not intercept when fallback is disabled");
+    TEST_ASSERT(!dec1.fallbackApplied, "No fallback should be applied without translator");
 
     // 2. DXIL SM 6.0 shader -> unsupported, fallback disabled by default
     struct {

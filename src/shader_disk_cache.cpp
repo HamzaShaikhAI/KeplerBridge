@@ -9,6 +9,7 @@
 #include <iomanip>
 #include <sstream>
 #include <chrono>
+#include <algorithm>
 
 namespace kepler {
 
@@ -35,6 +36,16 @@ void ShaderDiskCache::SetCacheDirectory(const std::string& dirPath) {
 const std::string& ShaderDiskCache::GetCacheDirectory() const {
     std::lock_guard<std::mutex> lock(m_mutex);
     return m_cacheDir;
+}
+
+void ShaderDiskCache::SetMaxDiskBudgetMB(size_t budgetMB) {
+    std::lock_guard<std::mutex> lock(m_mutex);
+    m_maxDiskBudgetMB = budgetMB;
+}
+
+size_t ShaderDiskCache::GetMaxDiskBudgetMB() const {
+    std::lock_guard<std::mutex> lock(m_mutex);
+    return m_maxDiskBudgetMB;
 }
 
 uint64_t ShaderDiskCache::ComputeHash64(const void* data, size_t length, uint64_t seed) {
@@ -69,6 +80,33 @@ uint64_t ShaderDiskCache::ComputeShaderKey(
     return hash;
 }
 
+uint64_t ShaderDiskCache::ComputeCompositeKey(
+    const void* inputBytecode,
+    size_t inputSize,
+    const std::string& targetProfile,
+    const std::string& backendId,
+    const std::string& driverId,
+    uint32_t translationFlags,
+    uint32_t engineVersion)
+{
+    uint64_t hash = 14695981039346656037ULL;
+    if (inputBytecode && inputSize > 0) {
+        hash = ComputeHash64(inputBytecode, inputSize, hash);
+    }
+    const char sep = '\0';
+    hash = ComputeHash64(&sep, 1, hash);
+    hash = ComputeHash64(targetProfile.data(), targetProfile.size(), hash);
+    hash = ComputeHash64(&sep, 1, hash);
+    hash = ComputeHash64(backendId.data(), backendId.size(), hash);
+    hash = ComputeHash64(&sep, 1, hash);
+    hash = ComputeHash64(driverId.data(), driverId.size(), hash);
+    hash = ComputeHash64(&sep, 1, hash);
+    hash = ComputeHash64(&translationFlags, sizeof(translationFlags), hash);
+    hash = ComputeHash64(&sep, 1, hash);
+    hash = ComputeHash64(&engineVersion, sizeof(engineVersion), hash);
+    return hash;
+}
+
 std::string ShaderDiskCache::GetFilePathForKey(uint64_t key) const {
     std::ostringstream ss;
     ss << m_cacheDir << "\\" << std::hex << std::setw(16) << std::setfill('0') << key << ".dxbc";
@@ -80,7 +118,6 @@ bool ShaderDiskCache::EnsureDirectoryExists(const std::string& path) const {
         return true;
     }
 
-    // Try creating parent directory first (e.g. kepler_cache then shaders)
     size_t lastSlash = path.find_last_of("\\/");
     if (lastSlash != std::string::npos) {
         std::string parent = path.substr(0, lastSlash);
@@ -124,6 +161,7 @@ bool ShaderDiskCache::TryGet(
     if (!file.good()) {
         file.close();
         m_misses.fetch_add(1);
+        m_invalidations.fetch_add(1);
         recordElapsed();
         return false;
     }
@@ -134,6 +172,7 @@ bool ShaderDiskCache::TryGet(
     {
         file.close();
         m_misses.fetch_add(1);
+        m_invalidations.fetch_add(1);
         recordElapsed();
         return false;
     }
@@ -144,6 +183,7 @@ bool ShaderDiskCache::TryGet(
     {
         file.close();
         m_misses.fetch_add(1);
+        m_invalidations.fetch_add(1);
         recordElapsed();
         return false;
     }
@@ -152,6 +192,7 @@ bool ShaderDiskCache::TryGet(
     if (header.bytecodeSize == 0 || header.bytecodeSize > 16 * 1024 * 1024) {
         file.close();
         m_misses.fetch_add(1);
+        m_invalidations.fetch_add(1);
         recordElapsed();
         return false;
     }
@@ -162,6 +203,7 @@ bool ShaderDiskCache::TryGet(
         outBytecode.clear();
         file.close();
         m_misses.fetch_add(1);
+        m_invalidations.fetch_add(1);
         recordElapsed();
         return false;
     }
@@ -172,20 +214,10 @@ bool ShaderDiskCache::TryGet(
     if (actualPayloadHash != header.payloadHash) {
         LOG_WARN("[ShaderDiskCache] Corrupted cache entry detected for key 0x" +
                  Logger::HexToString(shaderKey) + ". Removing.");
-        DiagnosticReport rep;
-        rep.errorCode = KeplerErrorCode::ShaderCacheCorruption;
-        rep.severity = ErrorSeverity::Warning;
-        rep.subsystem = "ShaderDiskCache";
-        rep.apiOperation = "TryGet";
-        rep.disposition = ExecutionDisposition::Fallback;
-        rep.resourceInfo = "Key: 0x" + Logger::HexToString(shaderKey) + ", Path: " + filePath;
-        rep.explanation = "Cryptographic payload checksum mismatch in cached shader file. File was modified or corrupted.";
-        rep.actionableHint = "Corrupt cache file was automatically deleted. Shader will be recompiled and re-cached safely.";
-        LOG_DIAGNOSTIC_REPORT(rep);
-
         outBytecode.clear();
         DeleteFileA(filePath.c_str());
         m_misses.fetch_add(1);
+        m_invalidations.fetch_add(1);
         recordElapsed();
         return false;
     }
@@ -194,6 +226,7 @@ bool ShaderDiskCache::TryGet(
     if (outBytecode.size() < 4) {
         outBytecode.clear();
         m_misses.fetch_add(1);
+        m_invalidations.fetch_add(1);
         recordElapsed();
         return false;
     }
@@ -203,6 +236,7 @@ bool ShaderDiskCache::TryGet(
         outBytecode.clear();
         DeleteFileA(filePath.c_str());
         m_misses.fetch_add(1);
+        m_invalidations.fetch_add(1);
         recordElapsed();
         return false;
     }
@@ -244,6 +278,9 @@ bool ShaderDiskCache::Put(
         return false;
     }
 
+    // Check disk quota before writing new file
+    EnforceDiskQuota();
+
     // Atomic write pattern: Write to temporary file, then MoveFileEx with REPLACE_EXISTING
     uint32_t tempId = m_tempCounter.fetch_add(1);
     std::ostringstream ssTmp;
@@ -284,6 +321,109 @@ bool ShaderDiskCache::Put(
     m_lastWriteTimeUs.store(elapsedUs);
     m_totalWriteTimeUs.fetch_add(elapsedUs);
     m_writes.fetch_add(1);
+    return true;
+}
+
+size_t ShaderDiskCache::CalculateCurrentDiskUsage() const {
+    std::string dir;
+    {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        dir = m_cacheDir;
+    }
+
+    WIN32_FIND_DATAA findData;
+    std::string searchPattern = dir + "\\*.dxbc";
+    HANDLE hFind = FindFirstFileA(searchPattern.c_str(), &findData);
+    if (hFind == INVALID_HANDLE_VALUE) return 0;
+
+    size_t totalBytes = 0;
+    do {
+        if (!(findData.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) {
+            ULARGE_INTEGER fileSize;
+            fileSize.LowPart = findData.nFileSizeLow;
+            fileSize.HighPart = findData.nFileSizeHigh;
+            totalBytes += static_cast<size_t>(fileSize.QuadPart);
+        }
+    } while (FindNextFileA(hFind, &findData));
+    FindClose(hFind);
+    return totalBytes;
+}
+
+size_t ShaderDiskCache::EnforceDiskQuota() {
+    std::string dir;
+    size_t budgetMB;
+    {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        dir = m_cacheDir;
+        budgetMB = m_maxDiskBudgetMB;
+    }
+
+    size_t budgetBytes = budgetMB * 1024 * 1024;
+    struct FileEntry {
+        std::string path;
+        FILETIME lastWrite;
+        size_t sizeBytes;
+    };
+
+    std::vector<FileEntry> files;
+    size_t totalBytes = 0;
+
+    WIN32_FIND_DATAA findData;
+    std::string searchPattern = dir + "\\*.dxbc";
+    HANDLE hFind = FindFirstFileA(searchPattern.c_str(), &findData);
+    if (hFind == INVALID_HANDLE_VALUE) return 0;
+
+    do {
+        if (!(findData.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) {
+            ULARGE_INTEGER fileSize;
+            fileSize.LowPart = findData.nFileSizeLow;
+            fileSize.HighPart = findData.nFileSizeHigh;
+            size_t sz = static_cast<size_t>(fileSize.QuadPart);
+            totalBytes += sz;
+            files.push_back({ dir + "\\" + findData.cFileName, findData.ftLastWriteTime, sz });
+        }
+    } while (FindNextFileA(hFind, &findData));
+    FindClose(hFind);
+
+    if (totalBytes <= budgetBytes) return 0;
+
+    // Sort oldest files first
+    std::sort(files.begin(), files.end(), [](const FileEntry& a, const FileEntry& b) {
+        return CompareFileTime(&a.lastWrite, &b.lastWrite) < 0;
+    });
+
+    size_t evictedCount = 0;
+    for (const auto& f : files) {
+        if (totalBytes <= budgetBytes) break;
+        if (DeleteFileA(f.path.c_str())) {
+            totalBytes -= f.sizeBytes;
+            evictedCount++;
+            m_evictions.fetch_add(1);
+        }
+    }
+
+    return evictedCount;
+}
+
+bool ShaderDiskCache::ClearCache() {
+    std::string dir;
+    {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        dir = m_cacheDir;
+    }
+
+    WIN32_FIND_DATAA findData;
+    std::string searchPattern = dir + "\\*.*";
+    HANDLE hFind = FindFirstFileA(searchPattern.c_str(), &findData);
+    if (hFind == INVALID_HANDLE_VALUE) return false;
+
+    do {
+        if (!(findData.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) {
+            std::string filePath = dir + "\\" + findData.cFileName;
+            DeleteFileA(filePath.c_str());
+        }
+    } while (FindNextFileA(hFind, &findData));
+    FindClose(hFind);
     return true;
 }
 

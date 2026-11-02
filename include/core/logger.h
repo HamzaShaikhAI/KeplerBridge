@@ -69,6 +69,8 @@ struct DiagnosticReport {
     std::string policyResult = "N/A";
     std::string resourceInfo = "N/A";
     std::string descriptorInfo = "N/A";
+    std::string submittedWorkInfo = "N/A";
+    std::string pipelineInfo = "N/A";
     ExecutionDisposition disposition = ExecutionDisposition::Rejected;
     std::string explanation;
     std::string actionableHint;

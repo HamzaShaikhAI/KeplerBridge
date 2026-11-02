@@ -23,8 +23,8 @@ struct PolicyEvaluationResult {
     std::string reason;
 };
 
-// Safe, standard COM Wrapper implementing ID3D12Device and ID3D12Device1
-class WrappedD3D12Device : public ID3D12Device1 {
+// Safe, standard COM Wrapper implementing ID3D12Device through ID3D12Device5
+class WrappedD3D12Device : public ID3D12Device5 {
 public:
     WrappedD3D12Device(ID3D12Device* realDevice, D3D_FEATURE_LEVEL spoofedLevel);
     virtual ~WrappedD3D12Device();
@@ -84,13 +84,48 @@ public:
     virtual HRESULT STDMETHODCALLTYPE SetEventOnMultipleFenceCompletion(ID3D12Fence* const* ppFences, const UINT64* pFenceValues, UINT NumFences, D3D12_MULTIPLE_FENCE_WAIT_FLAGS Flags, HANDLE hEvent) override;
     virtual HRESULT STDMETHODCALLTYPE SetResidencyPriority(UINT NumObjects, ID3D12Pageable* const* ppObjects, const D3D12_RESIDENCY_PRIORITY* pPriorities) override;
 
+    // ID3D12Device2
+    virtual HRESULT STDMETHODCALLTYPE CreatePipelineState(const D3D12_PIPELINE_STATE_STREAM_DESC* desc, REFIID riid, void** ppPipelineState) override;
+
+    // ID3D12Device3
+    virtual HRESULT STDMETHODCALLTYPE OpenExistingHeapFromAddress(const void* address, REFIID riid, void** ppvHeap) override;
+    virtual HRESULT STDMETHODCALLTYPE OpenExistingHeapFromFileMapping(HANDLE file_mapping, REFIID riid, void** ppvHeap) override;
+    virtual HRESULT STDMETHODCALLTYPE EnqueueMakeResident(D3D12_RESIDENCY_FLAGS flags, UINT num_objects, ID3D12Pageable* const* objects, ID3D12Fence* fence, UINT64 fence_value) override;
+
+    // ID3D12Device4
+    virtual HRESULT STDMETHODCALLTYPE CreateCommandList1(UINT node_mask, D3D12_COMMAND_LIST_TYPE type, D3D12_COMMAND_LIST_FLAGS flags, REFIID riid, void** ppCommandList) override;
+    virtual HRESULT STDMETHODCALLTYPE CreateProtectedResourceSession(const D3D12_PROTECTED_RESOURCE_SESSION_DESC* desc, REFIID riid, void** ppSession) override;
+    virtual HRESULT STDMETHODCALLTYPE CreateCommittedResource1(const D3D12_HEAP_PROPERTIES* heap_properties, D3D12_HEAP_FLAGS heap_flags, const D3D12_RESOURCE_DESC* desc, D3D12_RESOURCE_STATES initial_resource_state, const D3D12_CLEAR_VALUE* optimized_clear_value, ID3D12ProtectedResourceSession* protected_session, REFIID riid_resource, void** ppvResource) override;
+    virtual HRESULT STDMETHODCALLTYPE CreateHeap1(const D3D12_HEAP_DESC* desc, ID3D12ProtectedResourceSession* protected_session, REFIID riid, void** ppvHeap) override;
+    virtual HRESULT STDMETHODCALLTYPE CreateReservedResource1(const D3D12_RESOURCE_DESC* desc, D3D12_RESOURCE_STATES initial_state, const D3D12_CLEAR_VALUE* optimized_clear_value, ID3D12ProtectedResourceSession* protected_session, REFIID riid, void** ppvResource) override;
+    virtual D3D12_RESOURCE_ALLOCATION_INFO* STDMETHODCALLTYPE GetResourceAllocationInfo1(D3D12_RESOURCE_ALLOCATION_INFO* pRet, UINT visible_mask, UINT resource_descs_count, const D3D12_RESOURCE_DESC* resource_descs, D3D12_RESOURCE_ALLOCATION_INFO1* resource_allocation_info1) override;
+
+    // ID3D12Device5
+    virtual HRESULT STDMETHODCALLTYPE CreateLifetimeTracker(ID3D12LifetimeOwner* owner, REFIID riid, void** ppvTracker) override;
+    virtual void STDMETHODCALLTYPE RemoveDevice() override;
+    virtual HRESULT STDMETHODCALLTYPE EnumerateMetaCommands(UINT* meta_commands_count, D3D12_META_COMMAND_DESC* descs) override;
+    virtual HRESULT STDMETHODCALLTYPE EnumerateMetaCommandParameters(REFGUID command_id, D3D12_META_COMMAND_PARAMETER_STAGE stage, UINT* total_structure_size_in_bytes, UINT* parameter_count, D3D12_META_COMMAND_PARAMETER_DESC* parameter_descs) override;
+    virtual HRESULT STDMETHODCALLTYPE CreateMetaCommand(REFGUID command_id, UINT node_mask, const void* creation_parameters_data, SIZE_T creation_parameters_data_size_in_bytes, REFIID riid, void** ppvMetaCommand) override;
+    virtual HRESULT STDMETHODCALLTYPE CreateStateObject(const D3D12_STATE_OBJECT_DESC* desc, REFIID riid, void** ppvStateObject) override;
+    virtual void STDMETHODCALLTYPE GetRaytracingAccelerationStructurePrebuildInfo(const D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_INPUTS* desc, D3D12_RAYTRACING_ACCELERATION_STRUCTURE_PREBUILD_INFO* info) override;
+    virtual D3D12_DRIVER_MATCHING_IDENTIFIER_STATUS STDMETHODCALLTYPE CheckDriverMatchingIdentifier(D3D12_SERIALIZED_DATA_TYPE serialized_data_type, const D3D12_SERIALIZED_DATA_DRIVER_MATCHING_IDENTIFIER* identifier_to_check) override;
+
     ID3D12Device* GetRealDevice() const { return m_pReal; }
+
+    // Test seam for controlled device-removal verification
+    void SetSimulatedDeviceRemoval(HRESULT hr) { m_simulatedDeviceRemoval = hr; }
+    HRESULT GetSimulatedDeviceRemoval() const { return m_simulatedDeviceRemoval; }
 
 private:
     ID3D12Device* m_pReal = nullptr;
     ID3D12Device1* m_pReal1 = nullptr;
+    ID3D12Device2* m_pReal2 = nullptr;
+    ID3D12Device3* m_pReal3 = nullptr;
+    ID3D12Device4* m_pReal4 = nullptr;
+    ID3D12Device5* m_pReal5 = nullptr;
     std::atomic<ULONG> m_refCount{ 1 };
     D3D_FEATURE_LEVEL m_spoofedLevel = D3D_FEATURE_LEVEL_12_0;
+    HRESULT m_simulatedDeviceRemoval = S_OK;
 };
 
 class FeatureLevelCompat {

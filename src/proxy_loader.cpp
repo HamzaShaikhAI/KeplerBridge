@@ -2,8 +2,10 @@
 #include "core/feature_level_compat.h"
 #include "core/logger.h"
 #include "core/config.h"
+#include "core/profile_manager.h"
 #include "translator/d3d11_backend.h"
 #include "translator/resource_manager.h"
+#include "translator/wrapped_d3d12_device_factory.h"
 
 #include <sstream>
 #include <iomanip>
@@ -159,6 +161,7 @@ HRESULT WINAPI D3D12CreateDevice(
     }
 
     LOG_HOOK("=== [HOOK] D3D12CreateDevice Intercepted ===");
+    RuntimeTelemetry::Instance().RecordApiCall("D3D12CreateDevice");
 
     // Inspect Adapter
     if (pAdapter != nullptr) {
@@ -215,8 +218,10 @@ HRESULT WINAPI D3D12CreateDevice(
     }
 
     if (needsWrapper) {
-        D3D_FEATURE_LEVEL creationLevel = policy.should_intercept ? policy.creation_level : MinimumFeatureLevel;
-        D3D_FEATURE_LEVEL spoofLevel = policy.should_intercept ? policy.target_spoof_level : MinimumFeatureLevel;
+        D3D_FEATURE_LEVEL creationLevel = policy.creation_level;
+        D3D_FEATURE_LEVEL spoofLevel = Config::Instance().IsFeatureLevelSpoofEnabled() ?
+            policy.target_spoof_level :
+            (policy.should_intercept ? policy.target_spoof_level : MinimumFeatureLevel);
 
         LOG_HOOK("[COMPAT] Intercepting device creation: MinimumFeatureLevel " +
                  Logger::FeatureLevelToString(MinimumFeatureLevel) + " -> " +
@@ -250,6 +255,7 @@ HRESULT WINAPI D3D12CreateDevice(
 
         if (SUCCEEDED(hrWrap) && pWrapped) {
             *ppDevice = pWrapped;
+            RuntimeTelemetry::Instance().RecordD3D12DeviceCreated(creationLevel, spoofLevel, MinimumFeatureLevel);
             LOG_HOOK("[COMPAT] Successfully wrapped ID3D12Device with COM compatibility wrapper.");
             LOG_HOOK("============================================");
             return S_OK;
@@ -269,6 +275,9 @@ HRESULT WINAPI D3D12CreateDevice(
     if (FAILED(hr)) {
         LOG_DIAGNOSTIC("[DIAGNOSTIC] Hardware rejected device creation! Return code: " + Logger::HResultToString(hr));
     } else {
+        if (ppDevice && *ppDevice) {
+            RuntimeTelemetry::Instance().RecordD3D12DeviceCreated(MinimumFeatureLevel, MinimumFeatureLevel, MinimumFeatureLevel);
+        }
         LOG_INFO("Real D3D12CreateDevice succeeded. Device pointer: " +
                  (ppDevice && *ppDevice ? std::string("Non-null") : std::string("null")));
     }
@@ -358,16 +367,118 @@ HRESULT WINAPI D3D12CreateVersionedRootSignatureDeserializer(
         pSrcData, SrcDataSizeInBytes, pRootSignatureDeserializerInterface, ppvRootSignatureDeserializer);
 }
 
+static std::string ClsidToString(REFCLSID clsid) {
+    if (clsid == CLSID_D3D12SDKConfiguration) return "CLSID_D3D12SDKConfiguration";
+    if (clsid == CLSID_D3D12DeviceFactory) return "CLSID_D3D12DeviceFactory";
+    static const GUID guidD3D12Debug = { 0xf2352aeb, 0xdd84, 0x49fe, { 0xb9, 0x7b, 0xa9, 0xdc, 0xfd, 0xcc, 0x1b, 0x4f } };
+    static const GUID guidD3D12Tools = { 0xe38216b1, 0x3c8c, 0x4833, { 0xaa, 0x09, 0x0a, 0x06, 0xb6, 0x5d, 0x96, 0xc8 } };
+    static const GUID guidD3D12Dred  = { 0x4a75bbc4, 0x9ff4, 0x4ad8, { 0x9f, 0x18, 0xab, 0xae, 0x84, 0xdc, 0x5f, 0xf2 } };
+    if (clsid == guidD3D12Debug) return "CLSID_D3D12Debug";
+    if (clsid == guidD3D12Tools) return "CLSID_D3D12Tools";
+    if (clsid == guidD3D12Dred) return "CLSID_D3D12DeviceRemovedExtendedData";
+    return kepler::Logger::GuidToString(clsid);
+}
+
+static std::string RiidToString(REFIID riid) {
+    if (riid == IID_ID3D12SDKConfiguration) return "IID_ID3D12SDKConfiguration";
+    if (riid == IID_ID3D12SDKConfiguration1) return "IID_ID3D12SDKConfiguration1";
+    if (riid == IID_ID3D12DeviceFactory) return "IID_ID3D12DeviceFactory";
+    if (riid == __uuidof(IUnknown)) return "IID_IUnknown";
+    return kepler::Logger::GuidToString(riid);
+}
+
 HRESULT WINAPI D3D12GetInterface(REFCLSID rclsid, REFIID riid, void** ppvInterface) {
     using namespace kepler;
     auto& loader = ProxyLoader::Instance();
-    if (!loader.EnsureInitialized() || !loader.RealD3D12GetInterface) {
+    if (!loader.EnsureInitialized()) {
+        LOG_ERROR("[HOOK] D3D12GetInterface: ProxyLoader failed to initialize.");
         return E_FAIL;
     }
-    if (Config::Instance().IsVerboseCallsEnabled()) {
-        LOG_HOOK("D3D12GetInterface called");
+
+    if (!ppvInterface) {
+        LOG_WARN("[HOOK] D3D12GetInterface: ppvInterface is null (E_POINTER).");
+        return E_POINTER;
     }
-    return loader.RealD3D12GetInterface(rclsid, riid, ppvInterface);
+    *ppvInterface = nullptr;
+
+    std::string clsidStr = ClsidToString(rclsid);
+    std::string riidStr = RiidToString(riid);
+
+    LOG_HOOK("=== [HOOK] D3D12GetInterface Intercepted ===");
+    LOG_HOOK("Requested CLSID: " + clsidStr + " | RIID: " + riidStr);
+
+    // 1. SDK Configuration Interception (Agility SDK Dynamic Loader)
+    if (rclsid == CLSID_D3D12SDKConfiguration) {
+        LOG_HOOK("[SDKCONFIG] Direct SDK configuration query intercepted. Wrapping interface.");
+
+        ID3D12SDKConfiguration* pRealConfig = nullptr;
+        if (loader.RealD3D12GetInterface) {
+            HRESULT hrReal = loader.RealD3D12GetInterface(rclsid, riid, reinterpret_cast<void**>(&pRealConfig));
+            LOG_HOOK("[SDKCONFIG] Real D3D12GetInterface(CLSID_D3D12SDKConfiguration) returned: " +
+                     Logger::HResultToString(hrReal));
+        }
+
+        auto* wrappedConfig = new (std::nothrow) WrappedD3D12SDKConfiguration1(pRealConfig);
+        if (pRealConfig) {
+            pRealConfig->Release();
+        }
+
+        if (!wrappedConfig) {
+            LOG_ERROR("[SDKCONFIG] Failed to allocate WrappedD3D12SDKConfiguration1.");
+            LOG_HOOK("============================================");
+            return E_OUTOFMEMORY;
+        }
+
+        HRESULT hrQI = wrappedConfig->QueryInterface(riid, ppvInterface);
+        wrappedConfig->Release();
+
+        LOG_HOOK("[SDKCONFIG] Returning wrapped ID3D12SDKConfiguration interface. hr=" + Logger::HResultToString(hrQI));
+        LOG_HOOK("============================================");
+        return hrQI;
+    }
+
+    // 2. Device Factory Interception (Direct Factory Query)
+    if (rclsid == CLSID_D3D12DeviceFactory || rclsid == IID_ID3D12DeviceFactory || riid == IID_ID3D12DeviceFactory) {
+        LOG_HOOK("[FACTORY] Direct DeviceFactory query intercepted. Wrapping factory.");
+
+        ID3D12DeviceFactory* pRealFactory = nullptr;
+        if (loader.RealD3D12GetInterface) {
+            HRESULT hrReal = loader.RealD3D12GetInterface(rclsid, riid, reinterpret_cast<void**>(&pRealFactory));
+            LOG_HOOK("[FACTORY] Real D3D12GetInterface(DeviceFactory) returned: " +
+                     Logger::HResultToString(hrReal));
+        }
+
+        auto* wrappedFactory = new (std::nothrow) WrappedD3D12DeviceFactory(pRealFactory);
+        if (pRealFactory) {
+            pRealFactory->Release();
+        }
+
+        if (!wrappedFactory) {
+            LOG_ERROR("[FACTORY] Failed to allocate WrappedD3D12DeviceFactory.");
+            LOG_HOOK("============================================");
+            return E_OUTOFMEMORY;
+        }
+
+        HRESULT hrQI = wrappedFactory->QueryInterface(riid, ppvInterface);
+        wrappedFactory->Release();
+
+        LOG_HOOK("[FACTORY] Returning wrapped ID3D12DeviceFactory interface. hr=" + Logger::HResultToString(hrQI));
+        LOG_HOOK("============================================");
+        return hrQI;
+    }
+
+    // 3. Fallback Passthrough for Diagnostics / Tools / DRED / Debug
+    if (!loader.RealD3D12GetInterface) {
+        LOG_ERROR("[HOOK] Real D3D12GetInterface pointer is null!");
+        LOG_HOOK("============================================");
+        return E_FAIL;
+    }
+
+    LOG_HOOK("[PASSTHROUGH] Forwarding D3D12GetInterface to System32 D3D12.");
+    HRESULT hr = loader.RealD3D12GetInterface(rclsid, riid, ppvInterface);
+    LOG_HOOK("Returned HRESULT: " + Logger::HResultToString(hr));
+    LOG_HOOK("============================================");
+    return hr;
 }
 
 HRESULT WINAPI D3D12EnableExperimentalFeatures(
@@ -530,6 +641,64 @@ void WINAPI KeplerBridge_GetTranslationStats(
     using namespace kepler;
     if (pTranslatedCount) *pTranslatedCount = D3D11Backend::Instance().GetTranslatedCommandsCount();
     if (pRejectedCount) *pRejectedCount = D3D11Backend::Instance().GetRejectedCommandsCount();
+}
+
+void WINAPI KeplerBridge_GetSessionMetrics(
+    UINT* pOutcome,
+    UINT* pFramesPresented,
+    UINT* pShadersTranslated,
+    UINT* pShadersRejected,
+    UINT* pBatchesExecuted)
+{
+    using namespace kepler;
+    auto snap = RuntimeTelemetry::Instance().GetSnapshot();
+    if (pOutcome) *pOutcome = static_cast<UINT>(snap.outcome);
+    if (pFramesPresented) *pFramesPresented = static_cast<UINT>(snap.totalFramesPresented);
+    if (pShadersTranslated) *pShadersTranslated = snap.dxilShadersTranslated;
+    if (pShadersRejected) *pShadersRejected = snap.dxilShadersRejected;
+    if (pBatchesExecuted) *pBatchesExecuted = snap.commandBatchesExecuted;
+}
+
+void WINAPI KeplerBridge_GetCausalMetrics(
+    UINT64* pCausallyRenderedFrames,
+    UINT64* pCausalTranslatedDraws,
+    UINT64* pDuplicatePresentationsAvoided,
+    UINT* pPhysicalFL,
+    UINT* pVirtualizedFL)
+{
+    using namespace kepler;
+    auto snap = RuntimeTelemetry::Instance().GetSnapshot();
+    if (pCausallyRenderedFrames) *pCausallyRenderedFrames = snap.causallyRenderedFrames;
+    if (pCausalTranslatedDraws) *pCausalTranslatedDraws = snap.causalTranslatedDrawsRecorded;
+    if (pDuplicatePresentationsAvoided) *pDuplicatePresentationsAvoided = snap.duplicatePresentationsAvoided;
+    if (pPhysicalFL) *pPhysicalFL = static_cast<UINT>(snap.physicalFeatureLevel);
+    if (pVirtualizedFL) *pVirtualizedFL = static_cast<UINT>(snap.virtualizedFeatureLevel);
+}
+
+void WINAPI KeplerBridge_GetPresentationBreakdown(
+    UINT64* pPresentAttempts,
+    UINT64* pSuccessfulPresentCalls,
+    UINT64* pOccludedPresentAttempts,
+    UINT64* pVisiblePresentSuccesses,
+    UINT32* pPresentFailures,
+    UINT64* pPresentTestCalls,
+    UINT64* pRenderedWorkSubmissions,
+    UINT64* pCompletedTranslatedDraws,
+    UINT64* pCausallyRenderedVisible,
+    UINT64* pCausallyRenderedOccluded)
+{
+    using namespace kepler;
+    auto snap = RuntimeTelemetry::Instance().GetSnapshot();
+    if (pPresentAttempts) *pPresentAttempts = snap.presentAttempts;
+    if (pSuccessfulPresentCalls) *pSuccessfulPresentCalls = snap.successfulPresentCalls;
+    if (pOccludedPresentAttempts) *pOccludedPresentAttempts = snap.occludedPresentAttempts;
+    if (pVisiblePresentSuccesses) *pVisiblePresentSuccesses = snap.visiblePresentSuccesses;
+    if (pPresentFailures) *pPresentFailures = snap.presentFailures;
+    if (pPresentTestCalls) *pPresentTestCalls = snap.presentTestCalls;
+    if (pRenderedWorkSubmissions) *pRenderedWorkSubmissions = snap.renderedWorkSubmissions;
+    if (pCompletedTranslatedDraws) *pCompletedTranslatedDraws = snap.completedTranslatedDraws;
+    if (pCausallyRenderedVisible) *pCausallyRenderedVisible = snap.causallyRenderedVisibleFrames;
+    if (pCausallyRenderedOccluded) *pCausallyRenderedOccluded = snap.causallyRenderedOccludedFrames;
 }
 
 } // extern "C"

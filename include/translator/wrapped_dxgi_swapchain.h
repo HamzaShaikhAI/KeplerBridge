@@ -83,6 +83,8 @@ public:
     HRESULT InitializeBackBuffers();
     void ReleaseBackBuffers();
 
+    static bool IsWrapped(IDXGISwapChain* pSwapChain);
+
     IDXGISwapChain* GetReal() const { return m_pRealSwapChain; }
     UINT GetBufferCount() const { return static_cast<UINT>(m_d3d12BackBuffers.size()); }
     ID3D12Resource* GetD3D12BackBuffer(UINT index) const {
@@ -115,6 +117,7 @@ private:
 
     std::atomic<UINT> m_currentBackBufferIndex{ 0 };
     std::atomic<ULONG> m_refCount{ 1 };
+    LARGE_INTEGER m_lastPresentCounter{ 0 };
     std::mutex m_mutex;
 };
 

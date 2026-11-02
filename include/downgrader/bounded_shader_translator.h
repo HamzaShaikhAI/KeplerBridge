@@ -17,7 +17,7 @@ namespace kepler {
  * @brief Bounded Shader Translator for NVIDIA Kepler Architecture.
  *
  * Provides compiler-backed translation and strict capability boundary enforcement
- * for Direct3D 12 workloads targeting Kepler GK208 hardware (Feature Level 11_0, SM 5.0).
+ * for Direct3D 12 workloads targeting Kepler GK107/GK208 hardware (Feature Level 11_0, SM 5.0).
  *
  * Boundaries:
  * - Supported Stages: Vertex, Pixel, Compute

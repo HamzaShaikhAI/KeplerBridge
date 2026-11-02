@@ -201,8 +201,14 @@ void Logger::ReportDiagnostic(const DiagnosticReport& report) {
        << " [SHADER]      : Stage: " << report.shaderStage << " | Profile: " << report.shaderProfile
        << " | Policy: " << report.policyResult << "\n"
        << " [RESOURCE]    : " << SanitizePath(report.resourceInfo) << "\n"
-       << " [DESCRIPTOR]  : " << report.descriptorInfo << "\n"
-       << " [EXPLANATION] : " << report.explanation << "\n"
+       << " [DESCRIPTOR]  : " << report.descriptorInfo << "\n";
+    if (report.submittedWorkInfo != "N/A") {
+        ss << " [SUBMITTED WORK] : " << report.submittedWorkInfo << "\n";
+    }
+    if (report.pipelineInfo != "N/A") {
+        ss << " [PIPELINE/PSO]  : " << report.pipelineInfo << "\n";
+    }
+    ss << " [EXPLANATION] : " << report.explanation << "\n"
        << " [ACTION HINT] : " << report.actionableHint << "\n"
        << "================================================================\n";
 

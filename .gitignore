@@ -1,5 +1,6 @@
 # Build and compilation outputs
 build/
+build_gui/
 audit_build/
 bin/
 obj/
@@ -23,6 +24,15 @@ kepler_cache/
 *.log
 *.tmp
 *.bak
+*.bak_*
+.shader_autopsy.jsonl
+
+# Internal staging, scratch, backups, and release ZIP archives
+backups/
+staging/
+scratch/
+releases/*.zip
+reports/*.bmp
 
 # Distribution artifacts (managed as GitHub release assets, not in repo history)
 dist/

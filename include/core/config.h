@@ -23,24 +23,31 @@ public:
     // Downgrader settings
     bool IsShaderInspectionEnabled() const { return m_enableShaderInspection; }
     bool IsShaderFallbackEnabled() const { return m_enableShaderFallback; }
-    void SetShaderFallbackEnabled(bool enabled) { m_enableShaderFallback = enabled; }
+    void SetShaderFallbackEnabled(bool enabled);
     bool IsTextureClampingEnabled() const { return m_enableTextureClamping; }
     uint32_t GetMaxTextureResolution() const { return m_maxTextureResolution; }
     bool ShouldStripHeavyShaders() const { return m_stripHeavyShaders; }
 
     // Translation settings (Phase 4)
     bool IsD3D11TranslationEnabled() const { return m_enableD3D11Translation; }
-    void SetD3D11TranslationEnabled(bool enabled) { m_enableD3D11Translation = enabled; }
+    void SetD3D11TranslationEnabled(bool enabled);
     bool IsBarrierEmulationEnabled() const { return m_emulateBarriers; }
     bool IsStateTrackingEnabled() const { return m_enableStateTracking; }
+    bool ImmediateQueueFlushEnabled() const { return m_immediateQueueFlush; }
     bool IsImmediateQueueFlushEnabled() const { return m_immediateQueueFlush; }
     bool IsQueryEmulationEnabled() const { return m_emulateQueries; }
 
+    // Hardware Limits & Presentation Policies (Phase 11B)
+    uint32_t GetMaxConcurrentUAVs() const { return m_maxConcurrentUAVs; }
+    bool IsSafeFlipModeFallbackEnabled() const { return m_safeFlipModeFallback; }
+    const std::string& GetActiveProfileName() const { return m_activeProfileName; }
+
     // Shader Cache settings (Phase 6.1)
     bool IsShaderDiskCacheEnabled() const { return m_enableShaderDiskCache; }
-    void SetShaderDiskCacheEnabled(bool enabled) { m_enableShaderDiskCache = enabled; }
+    void SetShaderDiskCacheEnabled(bool enabled);
     const std::string& GetShaderCacheDirectory() const { return m_shaderCacheDir; }
 
+    void SyncFromActivePolicy();
     void LogSettings() const;
 
 private:
@@ -68,6 +75,11 @@ private:
     bool m_enableStateTracking = true;
     bool m_immediateQueueFlush = true;
     bool m_emulateQueries = true;
+
+    // Hardware Limits & Profile Metadata
+    uint32_t m_maxConcurrentUAVs = 8;
+    bool m_safeFlipModeFallback = true;
+    std::string m_activeProfileName = "Default";
 
     // Shader Cache settings
     bool m_enableShaderDiskCache = true;

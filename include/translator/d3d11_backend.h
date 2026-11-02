@@ -99,12 +99,32 @@ public:
         UINT initialCount = static_cast<UINT>(-1);
     };
 
+    struct ActiveSRVBinding {
+        ID3D11ShaderResourceView* pSRV = nullptr;
+        ID3D12Resource* pD3D12Resource = nullptr;
+        ID3D11Resource* pD3D11Resource = nullptr;
+    };
+
     ActiveUAVBinding GetActiveComputeUAV(UINT slot) const {
         return (slot < 8) ? m_activeComputeUAVs[slot] : ActiveUAVBinding{};
     }
     ActiveUAVBinding GetActiveGraphicsUAV(UINT slot) const {
         return (slot < 8) ? m_activeGraphicsUAVs[slot] : ActiveUAVBinding{};
     }
+    ActiveSRVBinding GetActiveComputeSRV(UINT slot) const {
+        return (slot < 16) ? m_activeComputeSRVs[slot] : ActiveSRVBinding{};
+    }
+    ActiveSRVBinding GetActivePixelSRV(UINT slot) const {
+        return (slot < 16) ? m_activePixelSRVs[slot] : ActiveSRVBinding{};
+    }
+    ActiveSRVBinding GetActiveVertexSRV(UINT slot) const {
+        return (slot < 16) ? m_activeVertexSRVs[slot] : ActiveSRVBinding{};
+    }
+
+    void BindSRV(UINT slot, ID3D11ShaderResourceView* pSRV, bool isCompute, D3D12_SHADER_VISIBILITY visibility, ID3D12Resource* pD3D12Res = nullptr);
+    void BindUAV(UINT slot, ID3D11UnorderedAccessView* pUAV, UINT initCount, bool isCompute, D3D12_SHADER_VISIBILITY visibility, ID3D12Resource* pD3D12Res = nullptr, ID3D11Resource* pD3D11Res = nullptr);
+    void ResolveUavSrvHazardBeforeSrvBind(ID3D11Resource* pTargetRes, const std::string& stageName);
+    void ResolveUavSrvHazardBeforeUavBind(ID3D11Resource* pTargetRes, UINT targetUavSlot);
 
     void SetDescriptorIncrementSize(UINT size) { m_descriptorIncrementSize = size; }
     UINT GetDescriptorIncrementSize() const { return m_descriptorIncrementSize; }
@@ -144,6 +164,9 @@ private:
 
     ActiveUAVBinding m_activeComputeUAVs[8] = {};
     ActiveUAVBinding m_activeGraphicsUAVs[8] = {};
+    ActiveSRVBinding m_activeComputeSRVs[16] = {};
+    ActiveSRVBinding m_activePixelSRVs[16] = {};
+    ActiveSRVBinding m_activeVertexSRVs[16] = {};
 
     ID3D11RenderTargetView* m_boundRTVs[8] = { nullptr };
     UINT m_numBoundRTVs = 0;
@@ -151,6 +174,7 @@ private:
 
     std::atomic<uint64_t> m_translatedCount{ 0 };
     std::atomic<uint64_t> m_rejectedCount{ 0 };
+    bool m_activePSOIsTranslated = false;
 
     std::atomic<uint32_t> m_psoBurstCount{ 0 };
     std::atomic<uint64_t> m_psoBurstCheckpointCount{ 0 };

@@ -3,10 +3,25 @@
 #include "translator/resource_manager.h"
 #include "core/logger.h"
 #include "core/config.h"
+#include "core/profile_manager.h"
+#include "downgrader/dxil_inspector.h"
+#include "downgrader/shader_policy.h"
+#include "downgrader/bounded_shader_translator.h"
 #include <iostream>
 #include <chrono>
 
 namespace kepler {
+
+static uint64_t ComputeBytecodeHash(const void* data, size_t size) {
+    if (!data || size == 0) return 0;
+    const uint8_t* p = reinterpret_cast<const uint8_t*>(data);
+    uint64_t h = 14695981039346656037ULL;
+    for (size_t i = 0; i < size; ++i) {
+        h ^= p[i];
+        h *= 1099511628211ULL;
+    }
+    return h;
+}
 
 D3D11Backend& D3D11Backend::Instance() {
     static D3D11Backend s_instance;
@@ -71,8 +86,16 @@ bool D3D11Backend::Initialize(IDXGIAdapter* pAdapter) {
     }
 
     m_initialized = true;
+    RuntimeTelemetry::Instance().RecordD3D11DeviceCreated();
     LOG_INFO("[D3D11Backend] Initialized Direct3D 11 backend successfully. Feature Level: " +
              Logger::FeatureLevelToString(static_cast<D3D_FEATURE_LEVEL>(m_featureLevel)));
+
+    // Ensure production shader lowering translator is registered with ShaderPolicy
+    if (!ShaderPolicy::Instance().HasActiveTranslator()) {
+        ShaderPolicy::Instance().RegisterTranslator(std::make_shared<BoundedShaderTranslator>());
+        LOG_INFO("[D3D11Backend] Registered BoundedShaderTranslator with ShaderPolicy for production shader lowering.");
+    }
+
     return true;
 }
 
@@ -113,6 +136,18 @@ void D3D11Backend::Shutdown(bool isProcessDetach) {
     m_rootConstantMapSkippedCount = 0;
     m_activeGraphicsRootSig = nullptr;
     m_activeComputeRootSig = nullptr;
+    for (UINT i = 0; i < 8; ++i) {
+        m_activeComputeUAVs[i] = {};
+        m_activeGraphicsUAVs[i] = {};
+        m_boundRTVs[i] = nullptr;
+    }
+    for (UINT i = 0; i < 16; ++i) {
+        m_activeComputeSRVs[i] = {};
+        m_activePixelSRVs[i] = {};
+        m_activeVertexSRVs[i] = {};
+    }
+    m_numBoundRTVs = 0;
+    m_boundDSV = nullptr;
     m_pContext = nullptr;
     m_pDevice = nullptr;
     m_pSyncQuery = nullptr;
@@ -251,33 +286,81 @@ HRESULT D3D11Backend::CreateTranslatedPSO(
     outPSO = {};
 
     // 1. Vertex Shader
-    if (pDesc->VS.pShaderBytecode && pDesc->VS.BytecodeLength > 0) {
+    const void* vsBytecode = pDesc->VS.pShaderBytecode;
+    size_t vsLength = pDesc->VS.BytecodeLength;
+    std::vector<uint8_t> vsFallback;
+
+    if (vsBytecode && vsLength > 0) {
+        ShaderInspectionResult insp = DxilInspector::InspectShader(vsBytecode, vsLength);
+        if (!insp.isSupportedOnKepler) {
+            ShaderPolicyDecision dec = ShaderPolicy::Instance().EvaluateShader(vsBytecode, vsLength, ShaderStage::Vertex);
+            if (dec.fallbackApplied && dec.effectiveBytecode && dec.effectiveLength > 0) {
+                vsFallback = std::move(dec.fallbackStorage);
+                vsBytecode = vsFallback.data();
+                vsLength = vsFallback.size();
+                LOG_INFO("[D3D11Backend] Vertex Shader lowered to SM 5.0 (" + std::to_string(vsLength) + " bytes).");
+            } else {
+                uint64_t hash = ComputeBytecodeHash(vsBytecode, vsLength);
+                LOG_WARN("[D3D11Backend] Vertex Shader SM " + std::to_string(insp.majorVersion) + "." + std::to_string(insp.minorVersion) +
+                         " (size: " + std::to_string(vsLength) + " bytes, hash: 0x" + Logger::HexToString(hash) +
+                         ") exceeds Kepler D3D11 Feature Level 11_0 limit (SM 5.0) and cannot be lowered within bounds. "
+                         "Safely skipping D3D11 shader creation without feeding invalid bytecode to CreateVertexShader.");
+                return DXGI_ERROR_UNSUPPORTED;
+            }
+        }
+
         HRESULT hr = m_pDevice->CreateVertexShader(
-            pDesc->VS.pShaderBytecode,
-            pDesc->VS.BytecodeLength,
+            vsBytecode,
+            vsLength,
             nullptr,
             &outPSO.pVS);
         if (FAILED(hr)) {
-            LOG_ERROR("[D3D11Backend] Failed to create translated Vertex Shader: " + Logger::HResultToString(hr));
+            uint64_t hash = ComputeBytecodeHash(vsBytecode, vsLength);
+            LOG_ERROR("[D3D11Backend] Failed to create translated Vertex Shader (size: " + std::to_string(vsLength) +
+                      " bytes, hash: 0x" + Logger::HexToString(hash) + "): " + Logger::HResultToString(hr));
             return hr;
         }
     }
 
     // 2. Pixel Shader
-    if (pDesc->PS.pShaderBytecode && pDesc->PS.BytecodeLength > 0) {
+    const void* psBytecode = pDesc->PS.pShaderBytecode;
+    size_t psLength = pDesc->PS.BytecodeLength;
+    std::vector<uint8_t> psFallback;
+
+    if (psBytecode && psLength > 0) {
+        ShaderInspectionResult insp = DxilInspector::InspectShader(psBytecode, psLength);
+        if (!insp.isSupportedOnKepler) {
+            ShaderPolicyDecision dec = ShaderPolicy::Instance().EvaluateShader(psBytecode, psLength, ShaderStage::Pixel);
+            if (dec.fallbackApplied && dec.effectiveBytecode && dec.effectiveLength > 0) {
+                psFallback = std::move(dec.fallbackStorage);
+                psBytecode = psFallback.data();
+                psLength = psFallback.size();
+                LOG_INFO("[D3D11Backend] Pixel Shader lowered to SM 5.0 (" + std::to_string(psLength) + " bytes).");
+            } else {
+                uint64_t hash = ComputeBytecodeHash(psBytecode, psLength);
+                LOG_WARN("[D3D11Backend] Pixel Shader SM " + std::to_string(insp.majorVersion) + "." + std::to_string(insp.minorVersion) +
+                         " (size: " + std::to_string(psLength) + " bytes, hash: 0x" + Logger::HexToString(hash) +
+                         ") exceeds Kepler D3D11 Feature Level 11_0 limit (SM 5.0) and cannot be lowered within bounds. "
+                         "Safely skipping D3D11 shader creation without feeding invalid bytecode to CreatePixelShader.");
+                return DXGI_ERROR_UNSUPPORTED;
+            }
+        }
+
         HRESULT hr = m_pDevice->CreatePixelShader(
-            pDesc->PS.pShaderBytecode,
-            pDesc->PS.BytecodeLength,
+            psBytecode,
+            psLength,
             nullptr,
             &outPSO.pPS);
         if (FAILED(hr)) {
-            LOG_ERROR("[D3D11Backend] Failed to create translated Pixel Shader: " + Logger::HResultToString(hr));
+            uint64_t hash = ComputeBytecodeHash(psBytecode, psLength);
+            LOG_ERROR("[D3D11Backend] Failed to create translated Pixel Shader (size: " + std::to_string(psLength) +
+                      " bytes, hash: 0x" + Logger::HexToString(hash) + "): " + Logger::HResultToString(hr));
             return hr;
         }
     }
 
     // 3. Input Layout
-    if (pDesc->InputLayout.NumElements > 0 && pDesc->InputLayout.pInputElementDescs && pDesc->VS.pShaderBytecode) {
+    if (pDesc->InputLayout.NumElements > 0 && pDesc->InputLayout.pInputElementDescs && vsBytecode) {
         std::vector<D3D11_INPUT_ELEMENT_DESC> d11Elements;
         d11Elements.reserve(pDesc->InputLayout.NumElements);
 
@@ -298,8 +381,8 @@ HRESULT D3D11Backend::CreateTranslatedPSO(
         HRESULT hr = m_pDevice->CreateInputLayout(
             d11Elements.data(),
             static_cast<UINT>(d11Elements.size()),
-            pDesc->VS.pShaderBytecode,
-            pDesc->VS.BytecodeLength,
+            vsBytecode,
+            vsLength,
             &outPSO.pInputLayout);
         if (FAILED(hr)) {
             LOG_ERROR("[D3D11Backend] Failed to create translated Input Layout: " + Logger::HResultToString(hr));
@@ -381,14 +464,38 @@ HRESULT D3D11Backend::CreateTranslatedComputePSO(
     if (!m_initialized || !m_pDevice || !pDesc) return E_FAIL;
     outPSO = {};
 
-    if (pDesc->CS.pShaderBytecode && pDesc->CS.BytecodeLength > 0) {
+    const void* csBytecode = pDesc->CS.pShaderBytecode;
+    size_t csLength = pDesc->CS.BytecodeLength;
+    std::vector<uint8_t> csFallback;
+
+    if (csBytecode && csLength > 0) {
+        ShaderInspectionResult insp = DxilInspector::InspectShader(csBytecode, csLength);
+        if (!insp.isSupportedOnKepler) {
+            ShaderPolicyDecision dec = ShaderPolicy::Instance().EvaluateShader(csBytecode, csLength, ShaderStage::Compute);
+            if (dec.fallbackApplied && dec.effectiveBytecode && dec.effectiveLength > 0) {
+                csFallback = std::move(dec.fallbackStorage);
+                csBytecode = csFallback.data();
+                csLength = csFallback.size();
+                LOG_INFO("[D3D11Backend] Compute Shader lowered to SM 5.0 (" + std::to_string(csLength) + " bytes).");
+            } else {
+                uint64_t hash = ComputeBytecodeHash(csBytecode, csLength);
+                LOG_WARN("[D3D11Backend] Compute Shader SM " + std::to_string(insp.majorVersion) + "." + std::to_string(insp.minorVersion) +
+                         " (size: " + std::to_string(csLength) + " bytes, hash: 0x" + Logger::HexToString(hash) +
+                         ") exceeds Kepler D3D11 Feature Level 11_0 limit (SM 5.0) and cannot be lowered within bounds. "
+                         "Safely skipping D3D11 shader creation without feeding invalid bytecode to CreateComputeShader.");
+                return DXGI_ERROR_UNSUPPORTED;
+            }
+        }
+
         HRESULT hr = m_pDevice->CreateComputeShader(
-            pDesc->CS.pShaderBytecode,
-            pDesc->CS.BytecodeLength,
+            csBytecode,
+            csLength,
             nullptr,
             &outPSO.pCS);
         if (FAILED(hr)) {
-            LOG_ERROR("[D3D11Backend] CreateComputeShader failed: " + Logger::HResultToString(hr));
+            uint64_t hash = ComputeBytecodeHash(csBytecode, csLength);
+            LOG_ERROR("[D3D11Backend] CreateComputeShader failed (size: " + std::to_string(csLength) +
+                      " bytes, hash: 0x" + Logger::HexToString(hash) + "): " + Logger::HResultToString(hr));
             return hr;
         }
     } else {
@@ -560,6 +667,9 @@ HRESULT D3D11Backend::CreateSwapChainForHwnd(
 HRESULT D3D11Backend::PresentSwapChain(IDXGISwapChain* pSwapChain, UINT syncInterval, UINT flags) {
     if (!pSwapChain) return E_POINTER;
     HRESULT hr = pSwapChain->Present(syncInterval, flags);
+    if (!RuntimeTelemetry::Instance().IsWrappedSwapChain(pSwapChain)) {
+        RuntimeTelemetry::Instance().RecordPresent(hr, 0.0, pSwapChain, 0, flags);
+    }
     if (FAILED(hr)) {
         DiagnosticReport rep;
         if (hr == DXGI_ERROR_DEVICE_REMOVED || hr == DXGI_ERROR_DEVICE_RESET) {
@@ -637,6 +747,163 @@ void D3D11Backend::ResolveBarrierHazards(const RecordedCommand& cmd) {
             }
             // Flush immediate context to drain queued UAV writes
             m_pContext->Flush();
+        }
+    }
+}
+
+void D3D11Backend::ResolveUavSrvHazardBeforeSrvBind(ID3D11Resource* pTargetRes, const std::string& stageName) {
+    if (!pTargetRes || !m_pContext) return;
+
+    // Check active Compute UAVs
+    for (UINT s = 0; s < 8; ++s) {
+        if (m_activeComputeUAVs[s].pUAV) {
+            ID3D11Resource* pUavRes = m_activeComputeUAVs[s].pD3D11Resource;
+            if (!pUavRes) {
+                m_activeComputeUAVs[s].pUAV->GetResource(&pUavRes);
+                if (pUavRes) {
+                    m_activeComputeUAVs[s].pD3D11Resource = pUavRes;
+                    pUavRes->Release(); // GetResource AddRefs
+                }
+            }
+            if (pUavRes == pTargetRes) {
+                ID3D11UnorderedAccessView* nullUAV[1] = { nullptr };
+                UINT initCount = static_cast<UINT>(-1);
+                m_pContext->CSSetUnorderedAccessViews(s, 1, nullUAV, &initCount);
+                m_activeComputeUAVs[s] = {};
+                LOG_INFO("[HAZARD] Automatically unbound conflicting Compute UAV slot " + std::to_string(s) +
+                         " prior to SRV bind in " + stageName);
+            }
+        }
+    }
+
+    // Check active Graphics UAVs
+    for (UINT s = 0; s < 8; ++s) {
+        if (m_activeGraphicsUAVs[s].pUAV) {
+            ID3D11Resource* pUavRes = m_activeGraphicsUAVs[s].pD3D11Resource;
+            if (!pUavRes) {
+                m_activeGraphicsUAVs[s].pUAV->GetResource(&pUavRes);
+                if (pUavRes) {
+                    m_activeGraphicsUAVs[s].pD3D11Resource = pUavRes;
+                    pUavRes->Release();
+                }
+            }
+            if (pUavRes == pTargetRes) {
+                m_activeGraphicsUAVs[s] = {};
+                LOG_INFO("[HAZARD] Cleared conflicting Graphics UAV slot " + std::to_string(s) +
+                         " prior to SRV bind in " + stageName);
+            }
+        }
+    }
+
+    // Check active RTVs
+    for (UINT s = 0; s < 8; ++s) {
+        if (m_boundRTVs[s]) {
+            ID3D11Resource* pRtvRes = nullptr;
+            m_boundRTVs[s]->GetResource(&pRtvRes);
+            if (pRtvRes) {
+                pRtvRes->Release();
+                if (pRtvRes == pTargetRes) {
+                    m_boundRTVs[s] = nullptr;
+                    m_pContext->OMSetRenderTargets(8, m_boundRTVs, m_boundDSV);
+                    LOG_INFO("[HAZARD] Automatically unbound conflicting RTV slot " + std::to_string(s) +
+                             " prior to SRV bind in " + stageName);
+                }
+            }
+        }
+    }
+}
+
+void D3D11Backend::ResolveUavSrvHazardBeforeUavBind(ID3D11Resource* pTargetRes, UINT targetUavSlot) {
+    if (!pTargetRes || !m_pContext) return;
+
+    // Check active Compute SRVs
+    for (UINT s = 0; s < 16; ++s) {
+        if (m_activeComputeSRVs[s].pSRV && m_activeComputeSRVs[s].pD3D11Resource == pTargetRes) {
+            ID3D11ShaderResourceView* nullSRV[1] = { nullptr };
+            m_pContext->CSSetShaderResources(s, 1, nullSRV);
+            m_activeComputeSRVs[s] = {};
+            LOG_INFO("[HAZARD] Automatically unbound conflicting CS SRV slot " + std::to_string(s) +
+                     " prior to UAV bind in slot " + std::to_string(targetUavSlot));
+        }
+    }
+
+    // Check active Pixel SRVs
+    for (UINT s = 0; s < 16; ++s) {
+        if (m_activePixelSRVs[s].pSRV && m_activePixelSRVs[s].pD3D11Resource == pTargetRes) {
+            ID3D11ShaderResourceView* nullSRV[1] = { nullptr };
+            m_pContext->PSSetShaderResources(s, 1, nullSRV);
+            m_activePixelSRVs[s] = {};
+            LOG_INFO("[HAZARD] Automatically unbound conflicting PS SRV slot " + std::to_string(s) +
+                     " prior to UAV bind in slot " + std::to_string(targetUavSlot));
+        }
+    }
+
+    // Check active Vertex SRVs
+    for (UINT s = 0; s < 16; ++s) {
+        if (m_activeVertexSRVs[s].pSRV && m_activeVertexSRVs[s].pD3D11Resource == pTargetRes) {
+            ID3D11ShaderResourceView* nullSRV[1] = { nullptr };
+            m_pContext->VSSetShaderResources(s, 1, nullSRV);
+            m_activeVertexSRVs[s] = {};
+            LOG_INFO("[HAZARD] Automatically unbound conflicting VS SRV slot " + std::to_string(s) +
+                     " prior to UAV bind in slot " + std::to_string(targetUavSlot));
+        }
+    }
+}
+
+void D3D11Backend::BindSRV(UINT slot, ID3D11ShaderResourceView* pSRV, bool isCompute, D3D12_SHADER_VISIBILITY visibility, ID3D12Resource* pD3D12Res) {
+    if (!m_initialized || !m_pContext) return;
+
+    ID3D11Resource* pD3D11Res = nullptr;
+    if (pSRV) {
+        pSRV->GetResource(&pD3D11Res);
+        if (pD3D11Res) {
+            std::string stageName = isCompute ? "CS" : (visibility == D3D12_SHADER_VISIBILITY_VERTEX ? "VS" : "PS");
+            ResolveUavSrvHazardBeforeSrvBind(pD3D11Res, stageName);
+            pD3D11Res->Release(); // GetResource AddRefs
+        }
+    }
+
+    if (isCompute) {
+        m_pContext->CSSetShaderResources(slot, 1, &pSRV);
+        if (slot < 16) {
+            m_activeComputeSRVs[slot] = { pSRV, pD3D12Res, pD3D11Res };
+        }
+    } else {
+        if (visibility == D3D12_SHADER_VISIBILITY_VERTEX || visibility == D3D12_SHADER_VISIBILITY_ALL) {
+            m_pContext->VSSetShaderResources(slot, 1, &pSRV);
+            if (slot < 16) {
+                m_activeVertexSRVs[slot] = { pSRV, pD3D12Res, pD3D11Res };
+            }
+        }
+        if (visibility == D3D12_SHADER_VISIBILITY_PIXEL || visibility == D3D12_SHADER_VISIBILITY_ALL) {
+            m_pContext->PSSetShaderResources(slot, 1, &pSRV);
+            if (slot < 16) {
+                m_activePixelSRVs[slot] = { pSRV, pD3D12Res, pD3D11Res };
+            }
+        }
+    }
+}
+
+void D3D11Backend::BindUAV(UINT slot, ID3D11UnorderedAccessView* pUAV, UINT initCount, bool isCompute, D3D12_SHADER_VISIBILITY visibility, ID3D12Resource* pD3D12Res, ID3D11Resource* pD3D11Res) {
+    if (!m_initialized || !m_pContext || slot >= 8) return;
+
+    if (pUAV && !pD3D11Res) {
+        pUAV->GetResource(&pD3D11Res);
+        if (pD3D11Res) {
+            pD3D11Res->Release(); // GetResource AddRefs
+        }
+    }
+
+    if (pD3D11Res) {
+        ResolveUavSrvHazardBeforeUavBind(pD3D11Res, slot);
+    }
+
+    if (isCompute) {
+        m_pContext->CSSetUnorderedAccessViews(slot, 1, &pUAV, &initCount);
+        m_activeComputeUAVs[slot] = { pUAV, pD3D12Res, pD3D11Res, initCount };
+    } else {
+        if (visibility == D3D12_SHADER_VISIBILITY_PIXEL || visibility == D3D12_SHADER_VISIBILITY_ALL) {
+            m_activeGraphicsUAVs[slot] = { pUAV, pD3D12Res, pD3D11Res, initCount };
         }
     }
 }
@@ -765,6 +1032,9 @@ HRESULT D3D11Backend::ExecuteSingleCommand(const RecordedCommand& cmd) {
                 cmd.drawInstanced.startVertexLocation,
                 cmd.drawInstanced.startInstanceLocation);
             m_translatedCount++;
+            if (m_activePSOIsTranslated) {
+                RuntimeTelemetry::Instance().SetUnpresentedTranslatedWork(true);
+            }
             break;
         }
 
@@ -776,6 +1046,9 @@ HRESULT D3D11Backend::ExecuteSingleCommand(const RecordedCommand& cmd) {
                 cmd.drawIndexed.baseVertexLocation,
                 cmd.drawIndexed.startInstanceLocation);
             m_translatedCount++;
+            if (m_activePSOIsTranslated) {
+                RuntimeTelemetry::Instance().SetUnpresentedTranslatedWork(true);
+            }
             break;
         }
 
@@ -785,6 +1058,9 @@ HRESULT D3D11Backend::ExecuteSingleCommand(const RecordedCommand& cmd) {
                 cmd.dispatch.threadGroupCountY,
                 cmd.dispatch.threadGroupCountZ);
             m_translatedCount++;
+            if (m_activePSOIsTranslated) {
+                RuntimeTelemetry::Instance().SetUnpresentedTranslatedWork(true);
+            }
             break;
         }
 
@@ -1017,15 +1293,30 @@ HRESULT D3D11Backend::ExecuteSingleCommand(const RecordedCommand& cmd) {
         case CommandType::SetPipelineState: {
             TranslatedPipelineState pso = {};
             if (ResourceManager::Instance().GetPSO(cmd.setPSO.pPipelineState, pso)) {
-                if (pso.pVS) m_pContext->VSSetShader(pso.pVS, nullptr, 0);
-                if (pso.pPS) m_pContext->PSSetShader(pso.pPS, nullptr, 0);
-                if (pso.pCS) m_pContext->CSSetShader(pso.pCS, nullptr, 0);
-                if (pso.pInputLayout) m_pContext->IASetInputLayout(pso.pInputLayout);
-                if (pso.pRasterizerState) m_pContext->RSSetState(pso.pRasterizerState);
-                if (pso.pBlendState) m_pContext->OMSetBlendState(pso.pBlendState, nullptr, 0xFFFFFFFF);
-                if (pso.pDepthStencilState) m_pContext->OMSetDepthStencilState(pso.pDepthStencilState, 0);
+                if (pso.pVS || pso.pPS || pso.pCS) {
+                    m_activePSOIsTranslated = true;
+                    // Valid translated PSO — apply all shader stages and pipeline state
+                    if (pso.pVS) m_pContext->VSSetShader(pso.pVS, nullptr, 0);
+                    if (pso.pPS) m_pContext->PSSetShader(pso.pPS, nullptr, 0);
+                    if (pso.pCS) m_pContext->CSSetShader(pso.pCS, nullptr, 0);
+                    if (pso.pInputLayout) m_pContext->IASetInputLayout(pso.pInputLayout);
+                    if (pso.pRasterizerState) m_pContext->RSSetState(pso.pRasterizerState);
+                    if (pso.pBlendState) m_pContext->OMSetBlendState(pso.pBlendState, nullptr, 0xFFFFFFFF);
+                    if (pso.pDepthStencilState) m_pContext->OMSetDepthStencilState(pso.pDepthStencilState, 0);
+                } else {
+                    m_activePSOIsTranslated = false;
+                    // Null sentinel — PSO was registered but translation was skipped (e.g. SM5.1 shader).
+                    // Explicitly unbind all D3D11 shader stages to prevent stale state from corrupting
+                    // subsequent translated draw calls when native D3D12 handles this PSO's draws.
+                    m_pContext->VSSetShader(nullptr, nullptr, 0);
+                    m_pContext->PSSetShader(nullptr, nullptr, 0);
+                    m_pContext->CSSetShader(nullptr, nullptr, 0);
+                    m_pContext->IASetInputLayout(nullptr);
+                    LOG_INFO("[TRANSLATION] SetPipelineState: PSO has no D3D11 translation (SM5.1 or unsupported); D3D11 stages cleared for clean state.");
+                }
                 m_translatedCount++;
             } else {
+                m_activePSOIsTranslated = false;
                 LOG_WARN("[TRANSLATION] SetPipelineState: PSO not registered in ResourceManager.");
                 m_rejectedCount++;
             }
@@ -1097,16 +1388,7 @@ HRESULT D3D11Backend::ExecuteSingleCommand(const RecordedCommand& cmd) {
                             case D3D12_DESCRIPTOR_RANGE_TYPE_SRV: {
                                 ID3D11ShaderResourceView* pSRV = ResourceManager::Instance().GetSRV(currentHandle);
                                 if (pSRV) {
-                                    if (isCompute) {
-                                        m_pContext->CSSetShaderResources(currentSlot, 1, &pSRV);
-                                    } else {
-                                        if (visibility == D3D12_SHADER_VISIBILITY_VERTEX || visibility == D3D12_SHADER_VISIBILITY_ALL) {
-                                            m_pContext->VSSetShaderResources(currentSlot, 1, &pSRV);
-                                        }
-                                        if (visibility == D3D12_SHADER_VISIBILITY_PIXEL || visibility == D3D12_SHADER_VISIBILITY_ALL) {
-                                            m_pContext->PSSetShaderResources(currentSlot, 1, &pSRV);
-                                        }
-                                    }
+                                    BindSRV(currentSlot, pSRV, isCompute, visibility);
                                 }
                                 break;
                             }
@@ -1114,15 +1396,11 @@ HRESULT D3D11Backend::ExecuteSingleCommand(const RecordedCommand& cmd) {
                                 TranslatedUAVInfo uavInfo = {};
                                 bool hasUavInfo = ResourceManager::Instance().GetUAVInfo(currentHandle, uavInfo);
                                 ID3D11UnorderedAccessView* pUAV = hasUavInfo ? uavInfo.pUAV : ResourceManager::Instance().GetUAV(currentHandle);
+                                UINT initCount = hasUavInfo ? uavInfo.initialCount : static_cast<UINT>(-1);
 
                                 if (isCompute) {
                                     if (currentSlot < 8) {
-                                        UINT initCount = hasUavInfo ? uavInfo.initialCount : static_cast<UINT>(-1);
-                                        m_pContext->CSSetUnorderedAccessViews(currentSlot, 1, &pUAV, &initCount);
-                                        m_activeComputeUAVs[currentSlot].pUAV = pUAV;
-                                        m_activeComputeUAVs[currentSlot].pD3D12Resource = hasUavInfo ? uavInfo.pD3D12Resource : nullptr;
-                                        m_activeComputeUAVs[currentSlot].pD3D11Resource = hasUavInfo ? uavInfo.pD3D11Resource : nullptr;
-                                        m_activeComputeUAVs[currentSlot].initialCount = initCount;
+                                        BindUAV(currentSlot, pUAV, initCount, true, visibility, hasUavInfo ? uavInfo.pD3D12Resource : nullptr, hasUavInfo ? uavInfo.pD3D11Resource : nullptr);
                                     } else {
                                         LOG_WARN("[TRANSLATION] Compute UAV slot " + std::to_string(currentSlot) +
                                                  " exceeds FL 11_0 limit of 8 registers.");
@@ -1130,11 +1408,7 @@ HRESULT D3D11Backend::ExecuteSingleCommand(const RecordedCommand& cmd) {
                                 } else {
                                     if (visibility == D3D12_SHADER_VISIBILITY_PIXEL || visibility == D3D12_SHADER_VISIBILITY_ALL) {
                                         if (currentSlot < 8) {
-                                            UINT initCount = hasUavInfo ? uavInfo.initialCount : static_cast<UINT>(-1);
-                                            m_activeGraphicsUAVs[currentSlot].pUAV = pUAV;
-                                            m_activeGraphicsUAVs[currentSlot].pD3D12Resource = hasUavInfo ? uavInfo.pD3D12Resource : nullptr;
-                                            m_activeGraphicsUAVs[currentSlot].pD3D11Resource = hasUavInfo ? uavInfo.pD3D11Resource : nullptr;
-                                            m_activeGraphicsUAVs[currentSlot].initialCount = initCount;
+                                            BindUAV(currentSlot, pUAV, initCount, false, visibility, hasUavInfo ? uavInfo.pD3D12Resource : nullptr, hasUavInfo ? uavInfo.pD3D11Resource : nullptr);
 
                                             UINT uavStartSlot = m_numBoundRTVs;
                                             if (currentSlot >= uavStartSlot && (m_numBoundRTVs + (currentSlot - uavStartSlot + 1) <= 8)) {
@@ -1214,24 +1488,15 @@ HRESULT D3D11Backend::ExecuteSingleCommand(const RecordedCommand& cmd) {
                 UINT slot = rootParamIndex;
                 ID3D11ShaderResourceView* pSRV = ResourceManager::Instance().GetSRV(basePtr);
                 if (pSRV) {
-                    if (!isCompute) {
-                        m_pContext->PSSetShaderResources(slot, 1, &pSRV);
-                        m_pContext->VSSetShaderResources(slot, 1, &pSRV);
-                    } else {
-                        m_pContext->CSSetShaderResources(slot, 1, &pSRV);
-                    }
+                    BindSRV(slot, pSRV, isCompute, isCompute ? D3D12_SHADER_VISIBILITY_ALL : D3D12_SHADER_VISIBILITY_ALL);
                 }
 
                 TranslatedUAVInfo uavInfo = {};
                 bool hasUavInfo = ResourceManager::Instance().GetUAVInfo(basePtr, uavInfo);
                 ID3D11UnorderedAccessView* pUAV = hasUavInfo ? uavInfo.pUAV : ResourceManager::Instance().GetUAV(basePtr);
-                if (isCompute && slot < 8) {
+                if (pUAV && isCompute && slot < 8) {
                     UINT initCount = hasUavInfo ? uavInfo.initialCount : static_cast<UINT>(-1);
-                    m_pContext->CSSetUnorderedAccessViews(slot, 1, &pUAV, &initCount);
-                    m_activeComputeUAVs[slot].pUAV = pUAV;
-                    m_activeComputeUAVs[slot].pD3D12Resource = hasUavInfo ? uavInfo.pD3D12Resource : nullptr;
-                    m_activeComputeUAVs[slot].pD3D11Resource = hasUavInfo ? uavInfo.pD3D11Resource : nullptr;
-                    m_activeComputeUAVs[slot].initialCount = initCount;
+                    BindUAV(slot, pUAV, initCount, true, D3D12_SHADER_VISIBILITY_ALL, hasUavInfo ? uavInfo.pD3D12Resource : nullptr, hasUavInfo ? uavInfo.pD3D11Resource : nullptr);
                 }
 
                 ID3D11Buffer* pCB = ResourceManager::Instance().GetCBV(basePtr);
@@ -1326,6 +1591,16 @@ HRESULT D3D11Backend::ReplayCommandBatch(const CommandBatch& batch) {
                  std::to_string(m_translatedCount.load() - startTranslated) + " executed, " +
                  std::to_string(m_rejectedCount.load() - startRejected) + " rejected/unsupported)");
     }
+
+    if (m_pDevice) {
+        HRESULT reason = m_pDevice->GetDeviceRemovedReason();
+        if (FAILED(reason)) {
+            RuntimeTelemetry::Instance().RecordDeviceRemoval(
+                reason, "D3D11Backend::ReplayCommandBatch", "Device failure detected during batch replay");
+            return reason;
+        }
+    }
+
     return S_OK;
 }
 
@@ -1365,6 +1640,21 @@ HRESULT D3D11Backend::WaitForGpuCompletion(DWORD timeoutMs) {
         hr = m_pContext->GetData(m_pSyncQuery, &queryData, sizeof(BOOL), 0);
         if (hr == S_OK) {
             break;
+        }
+
+        if (hr == DXGI_ERROR_DEVICE_REMOVED || hr == DXGI_ERROR_DEVICE_RESET || hr == DXGI_ERROR_DEVICE_HUNG) {
+            RuntimeTelemetry::Instance().RecordDeviceRemoval(
+                hr, "D3D11Backend::WaitForGpuCompletion", "GetData returned device removal error");
+            return hr;
+        }
+
+        if (m_pDevice) {
+            HRESULT reason = m_pDevice->GetDeviceRemovedReason();
+            if (FAILED(reason)) {
+                RuntimeTelemetry::Instance().RecordDeviceRemoval(
+                    reason, "D3D11Backend::WaitForGpuCompletion", "Device removed during GPU completion wait");
+                return reason;
+            }
         }
 
         auto elapsedMs = std::chrono::duration_cast<std::chrono::milliseconds>(

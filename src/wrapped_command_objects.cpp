@@ -3,6 +3,7 @@
 #include "translator/resource_manager.h"
 #include "core/logger.h"
 #include "core/config.h"
+#include "core/profile_manager.h"
 
 namespace kepler {
 
@@ -233,6 +234,7 @@ void STDMETHODCALLTYPE WrappedD3D12GraphicsCommandList::DrawInstanced(UINT Verte
     cmd.type = CommandType::DrawInstanced;
     cmd.drawInstanced = { VertexCountPerInstance, InstanceCount, StartVertexLocation, StartInstanceLocation };
     m_batch.Append(std::move(cmd));
+    RuntimeTelemetry::Instance().RecordCausalDrawOrDispatch(this, true);
     if (ShouldForwardToReal()) m_pReal->DrawInstanced(VertexCountPerInstance, InstanceCount, StartVertexLocation, StartInstanceLocation);
 }
 
@@ -242,6 +244,7 @@ void STDMETHODCALLTYPE WrappedD3D12GraphicsCommandList::DrawIndexedInstanced(UIN
     cmd.type = CommandType::DrawIndexedInstanced;
     cmd.drawIndexed = { IndexCountPerInstance, InstanceCount, StartIndexLocation, BaseVertexLocation, StartInstanceLocation };
     m_batch.Append(std::move(cmd));
+    RuntimeTelemetry::Instance().RecordCausalDrawOrDispatch(this, true);
     if (ShouldForwardToReal()) m_pReal->DrawIndexedInstanced(IndexCountPerInstance, InstanceCount, StartIndexLocation, BaseVertexLocation, StartInstanceLocation);
 }
 
@@ -251,6 +254,7 @@ void STDMETHODCALLTYPE WrappedD3D12GraphicsCommandList::Dispatch(UINT ThreadGrou
     cmd.type = CommandType::Dispatch;
     cmd.dispatch = { ThreadGroupCountX, ThreadGroupCountY, ThreadGroupCountZ };
     m_batch.Append(std::move(cmd));
+    RuntimeTelemetry::Instance().RecordCausalDrawOrDispatch(this, false);
     if (ShouldForwardToReal()) m_pReal->Dispatch(ThreadGroupCountX, ThreadGroupCountY, ThreadGroupCountZ);
 }
 
@@ -331,6 +335,7 @@ void STDMETHODCALLTYPE WrappedD3D12GraphicsCommandList::SetPipelineState(ID3D12P
     cmd.type = CommandType::SetPipelineState;
     cmd.setPSO = { pPipelineState };
     m_batch.Append(std::move(cmd));
+    RuntimeTelemetry::Instance().RecordCausalPipelineBound(this, pPipelineState);
     if (ShouldForwardToReal()) m_pReal->SetPipelineState(pPipelineState);
 }
 
@@ -698,6 +703,18 @@ void STDMETHODCALLTYPE WrappedD3D12CommandQueue::CopyTileMappings(ID3D12Resource
 
 void STDMETHODCALLTYPE WrappedD3D12CommandQueue::ExecuteCommandLists(UINT NumCommandLists, ID3D12CommandList* const* ppCommandLists) {
     std::lock_guard<std::mutex> lock(m_mutex);
+    RuntimeTelemetry::Instance().RecordApiCall("ExecuteCommandLists");
+    RuntimeTelemetry::Instance().RecordCommandBatchExecuted();
+
+    if (ppCommandLists && NumCommandLists > 0) {
+        for (UINT i = 0; i < NumCommandLists; ++i) {
+            RuntimeTelemetry::Instance().RecordCausalBatchExecuted(ppCommandLists[i]);
+        }
+        uint64_t cmdListId = reinterpret_cast<uint64_t>(ppCommandLists[0]);
+        std::string desc = "ExecuteCommandLists: NumLists=" + std::to_string(NumCommandLists) +
+                           " QueueType=" + std::to_string(static_cast<int>(m_desc.Type));
+        RuntimeTelemetry::Instance().SetLastSubmittedWork(cmdListId, desc);
+    }
 
     // If D3D11 translation mode is enabled, replay recorded command batches onto D3D11 backend
     if (Config::Instance().IsD3D11TranslationEnabled() && D3D11Backend::Instance().IsInitialized()) {
@@ -721,6 +738,17 @@ void STDMETHODCALLTYPE WrappedD3D12CommandQueue::ExecuteCommandLists(UINT NumCom
         }
         m_pReal->ExecuteCommandLists(static_cast<UINT>(realLists.size()), realLists.data());
     }
+
+    // Best-effort check for device removal following command list submission
+    if (m_pDevice) {
+        HRESULT reason = m_pDevice->GetDeviceRemovedReason();
+        if (FAILED(reason)) {
+            RuntimeTelemetry::Instance().RecordDeviceRemoval(
+                reason,
+                "WrappedD3D12CommandQueue::ExecuteCommandLists",
+                "Device failure observed during or after command list submission");
+        }
+    }
 }
 
 void STDMETHODCALLTYPE WrappedD3D12CommandQueue::SetMarker(UINT Metadata, const void* pData, UINT Size) {
@@ -740,11 +768,21 @@ HRESULT STDMETHODCALLTYPE WrappedD3D12CommandQueue::Signal(ID3D12Fence* pFence, 
     if (Config::Instance().IsD3D11TranslationEnabled() && D3D11Backend::Instance().IsInitialized()) {
         D3D11Backend::Instance().WaitForGpuCompletion();
     }
-    return m_pReal ? m_pReal->Signal(pFence, Value) : S_OK;
+    HRESULT hr = m_pReal ? m_pReal->Signal(pFence, Value) : S_OK;
+    if (FAILED(hr) && (hr == DXGI_ERROR_DEVICE_REMOVED || hr == DXGI_ERROR_DEVICE_HUNG || hr == DXGI_ERROR_DEVICE_RESET)) {
+        RuntimeTelemetry::Instance().RecordDeviceRemoval(
+            hr, "WrappedD3D12CommandQueue::Signal", "Fence signal failed due to device removal");
+    }
+    return hr;
 }
 
 HRESULT STDMETHODCALLTYPE WrappedD3D12CommandQueue::Wait(ID3D12Fence* pFence, UINT64 Value) {
-    return m_pReal ? m_pReal->Wait(pFence, Value) : S_OK;
+    HRESULT hr = m_pReal ? m_pReal->Wait(pFence, Value) : S_OK;
+    if (FAILED(hr) && (hr == DXGI_ERROR_DEVICE_REMOVED || hr == DXGI_ERROR_DEVICE_HUNG || hr == DXGI_ERROR_DEVICE_RESET)) {
+        RuntimeTelemetry::Instance().RecordDeviceRemoval(
+            hr, "WrappedD3D12CommandQueue::Wait", "Fence wait failed due to device removal");
+    }
+    return hr;
 }
 
 HRESULT STDMETHODCALLTYPE WrappedD3D12CommandQueue::GetTimestampFrequency(UINT64* pFrequency) {

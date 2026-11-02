@@ -2,6 +2,7 @@
 #include "downgrader/shader_policy.h"
 #include "core/config.h"
 #include "core/logger.h"
+#include "core/profile_manager.h"
 #include "translator/d3d11_backend.h"
 #include "translator/resource_manager.h"
 #include <sstream>
@@ -111,13 +112,23 @@ HRESULT PSOHook::InterceptCreateGraphicsPipelineState(
             if (D3D11Backend::Instance().IsInitialized()) {
                 const D3D12_GRAPHICS_PIPELINE_STATE_DESC* pEffDesc = anyFallbackApplied ? &modifiedDesc : pDesc;
                 TranslatedPipelineState translatedPSO = {};
-                if (SUCCEEDED(D3D11Backend::Instance().CreateTranslatedPSO(pEffDesc, translatedPSO))) {
+                HRESULT hrD11 = D3D11Backend::Instance().CreateTranslatedPSO(pEffDesc, translatedPSO);
+                if (SUCCEEDED(hrD11)) {
                     ResourceManager::Instance().RegisterPSO(reinterpret_cast<ID3D12PipelineState*>(*ppPipelineState), translatedPSO);
+                    RuntimeTelemetry::Instance().RecordCausalPSOCreated(*ppPipelineState, true);
                     LOG_HOOK("[PSO] Successfully registered translated D3D11 PSO.");
+                } else {
+                    // Register a null sentinel so SetPipelineState can cleanly unbind stale D3D11 shader stages
+                    // instead of leaving them in an undefined state when this native SM5.1 PSO is activated.
+                    TranslatedPipelineState nullPSO = {};
+                    ResourceManager::Instance().RegisterPSO(reinterpret_cast<ID3D12PipelineState*>(*ppPipelineState), nullPSO);
+                    RuntimeTelemetry::Instance().RecordCausalPSOCreated(*ppPipelineState, false);
+                    LOG_INFO("[PSO] D3D11 PSO translation skipped (" + Logger::HResultToString(hrD11) + "). Null sentinel registered for clean D3D11 state unbinding.");
                 }
             }
         } else {
             D3D11Backend::Instance().NotifyPsoCreated();
+            RuntimeTelemetry::Instance().RecordCausalPSOCreated(*ppPipelineState, false);
         }
     }
 
@@ -200,13 +211,23 @@ HRESULT PSOHook::InterceptCreateComputePipelineState(
             if (D3D11Backend::Instance().IsInitialized()) {
                 const D3D12_COMPUTE_PIPELINE_STATE_DESC* pEffDesc = fallbackApplied ? &modifiedDesc : pDesc;
                 TranslatedPipelineState translatedPSO = {};
-                if (SUCCEEDED(D3D11Backend::Instance().CreateTranslatedComputePSO(pEffDesc, translatedPSO))) {
+                HRESULT hrD11 = D3D11Backend::Instance().CreateTranslatedComputePSO(pEffDesc, translatedPSO);
+                if (SUCCEEDED(hrD11)) {
                     ResourceManager::Instance().RegisterPSO(reinterpret_cast<ID3D12PipelineState*>(*ppPipelineState), translatedPSO);
+                    RuntimeTelemetry::Instance().RecordCausalPSOCreated(*ppPipelineState, true);
                     LOG_HOOK("[PSO] Successfully registered translated D3D11 Compute PSO.");
+                } else {
+                    // Register a null sentinel so SetPipelineState can cleanly unbind stale D3D11 shader stages
+                    // instead of leaving them in an undefined state when this native SM5.1 compute PSO is activated.
+                    TranslatedPipelineState nullPSO = {};
+                    ResourceManager::Instance().RegisterPSO(reinterpret_cast<ID3D12PipelineState*>(*ppPipelineState), nullPSO);
+                    RuntimeTelemetry::Instance().RecordCausalPSOCreated(*ppPipelineState, false);
+                    LOG_INFO("[PSO] D3D11 Compute PSO translation skipped (" + Logger::HResultToString(hrD11) + "). Null sentinel registered for clean D3D11 state unbinding.");
                 }
             }
         } else {
             D3D11Backend::Instance().NotifyPsoCreated();
+            RuntimeTelemetry::Instance().RecordCausalPSOCreated(*ppPipelineState, false);
         }
     }
 

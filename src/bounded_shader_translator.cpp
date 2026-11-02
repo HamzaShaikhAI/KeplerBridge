@@ -1,7 +1,10 @@
 #include "downgrader/bounded_shader_translator.h"
 #include "downgrader/shader_disk_cache.h"
+#include "downgrader/sm51_lowering.h"
+#include "downgrader/dxil_translation.h"
 #include "core/config.h"
 #include "core/logger.h"
+#include "core/profile_manager.h"
 #include <chrono>
 
 namespace kepler {
@@ -73,7 +76,20 @@ bool BoundedShaderTranslator::CanTranslate(const ShaderInspectionResult& info) c
         return false;
     }
 
-    // 3. Check if compiler is available and a fallback or bounded translation path exists
+    // 3. Direct bytecode lowering for SM 5.1 DXBC shaders
+    if (info.containerType == ShaderContainerType::LegacyDXBC &&
+        info.majorVersion == 5 && info.minorVersion == 1)
+    {
+        return true;
+    }
+
+    // 4. Direct bytecode lowering for DXIL SM 6.x shaders
+    if (info.hasDXILChunk || info.containerType == ShaderContainerType::DXIL || info.majorVersion >= 6)
+    {
+        return true;
+    }
+
+    // 4. Check if compiler is available and a fallback or bounded translation path exists
     std::lock_guard<std::mutex> lock(m_mutex);
     if (!m_pfnCompile) {
         return false;
@@ -105,6 +121,7 @@ bool BoundedShaderTranslator::CompileHLSLToDXBC(
         shaderKey = ShaderDiskCache::ComputeShaderKey(hlslSource, entryPoint, targetProfile, compileFlags);
         if (ShaderDiskCache::Instance().TryGet(shaderKey, compileFlags, outBytecode)) {
             m_cacheBypassCount.fetch_add(1);
+            RuntimeTelemetry::Instance().RecordPSOCompilation(true, 0.0);
             LOG_INFO("[BoundedShaderTranslator] Cache HIT for shader [" + entryPoint + ", " + targetProfile +
                      "] (key: 0x" + Logger::HexToString(shaderKey) + ", " +
                      std::to_string(outBytecode.size()) + " bytes). Compilation bypassed.");
@@ -158,6 +175,7 @@ bool BoundedShaderTranslator::CompileHLSLToDXBC(
     size_t size = pCode->GetBufferSize();
     outBytecode.assign(pData, pData + size);
     pCode->Release();
+    RuntimeTelemetry::Instance().RecordPSOCompilation(false, 0.0);
 
     LOG_INFO("[BoundedShaderTranslator] Compiled HLSL (" + entryPoint + ", " + targetProfile +
              ") -> " + std::to_string(size) + " bytes authentic DXBC SM 5.0.");
@@ -193,7 +211,52 @@ bool BoundedShaderTranslator::Translate(
         return false;
     }
 
-    // 2. Select appropriate SM 5.0 profile
+    // 2. Direct bytecode lowering for SM 5.1 DXBC shaders
+    if (info.containerType == ShaderContainerType::LegacyDXBC &&
+        info.majorVersion == 5 && info.minorVersion == 1)
+    {
+        SM51LoweringReport rep;
+        if (SM51LoweringEngine::LowerSM51ToSM50(srcBytecode, srcLength, outBytecode, &rep)) {
+            LOG_INFO("[BoundedShaderTranslator] Successfully lowered SM 5.1 shader (" +
+                     std::to_string(srcLength) + "B -> " + std::to_string(outBytecode.size()) +
+                     "B authentic SM 5.0 DXBC). SRVs=" + std::to_string(rep.declaredSRVs) +
+                     ", UAVs=" + std::to_string(rep.declaredUAVs) +
+                     ", CBVs=" + std::to_string(rep.declaredCBVs) +
+                     ", Samplers=" + std::to_string(rep.declaredSamplers));
+            return true;
+        } else {
+            outErrorMessage = "SM 5.1 Lowering failed: " + rep.diagnostic + " (" +
+                              SM51LoweringEngine::StatusToString(rep.status) + ")";
+            LOG_WARN("[BoundedShaderTranslator] " + outErrorMessage);
+            return false;
+        }
+    }
+
+    // 3. Direct bytecode lowering for DXIL SM 6.x shaders
+    std::string directDxilError;
+    if (info.hasDXILChunk || info.containerType == ShaderContainerType::DXIL || info.majorVersion >= 6)
+    {
+        RuntimeTelemetry::Instance().RecordDxilShaderEncountered();
+        DXILTranslationReport rep;
+        if (DXILTranslationEngine::TranslateDXILToSM50(srcBytecode, srcLength, outBytecode, &rep)) {
+            RuntimeTelemetry::Instance().RecordDxilShaderTranslated();
+            LOG_INFO("[BoundedShaderTranslator] Successfully translated DXIL SM 6.x shader (" +
+                     std::to_string(srcLength) + "B -> " + std::to_string(outBytecode.size()) +
+                     "B authentic SM 5.0 DXBC). Inputs=" + std::to_string(rep.declaredInputs) +
+                     ", Outputs=" + std::to_string(rep.declaredOutputs) +
+                     ", CBVs=" + std::to_string(rep.declaredCBVs) +
+                     ", SRVs=" + std::to_string(rep.declaredSRVs) +
+                     ", Samplers=" + std::to_string(rep.declaredSamplers));
+            return true;
+        } else {
+            RuntimeTelemetry::Instance().RecordDxilShaderRejected();
+            directDxilError = "DXIL Translation failed: " + rep.diagnostic + " (" +
+                              DXILTranslationEngine::StatusToString(rep.status) + ")";
+            LOG_WARN("[BoundedShaderTranslator] " + directDxilError);
+        }
+    }
+
+    // 4. Select appropriate SM 5.0 profile
     std::string targetProfile;
     switch (info.stage) {
         case ShaderStage::Vertex:  targetProfile = "vs_5_0"; break;
@@ -204,14 +267,18 @@ bool BoundedShaderTranslator::Translate(
             return false;
     }
 
-    // 3. Check for registered stage fallback source
+    // 5. Check for registered stage fallback source
     std::lock_guard<std::mutex> lock(m_mutex);
     auto it = m_fallbackSources.find(info.stage);
     if (it != m_fallbackSources.end() && !it->second.source.empty()) {
         return CompileHLSLToDXBC(it->second.source, it->second.entryPoint, targetProfile, outBytecode, outErrorMessage);
     }
 
-    outErrorMessage = "No validated translation path exists for this shader bytecode. Preserving native rejection.";
+    if (!directDxilError.empty()) {
+        outErrorMessage = directDxilError;
+    } else {
+        outErrorMessage = "No validated translation path exists for this shader bytecode. Preserving native rejection.";
+    }
     return false;
 }
 

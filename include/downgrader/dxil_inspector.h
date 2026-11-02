@@ -45,7 +45,7 @@ struct ShaderInspectionResult {
     std::vector<std::string> chunkTypes;
     std::string statusMessage;
     size_t totalBytecodeSize = 0;
-    bool isSupportedOnKepler = false; // True if SM <= 5.1 and not DXIL
+    bool isSupportedOnKepler = false; // True if SM <= 5.0 and not DXIL (native Kepler D3D11 execution limit)
 };
 
 class DxilInspector {

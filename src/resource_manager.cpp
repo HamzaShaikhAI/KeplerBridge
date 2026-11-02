@@ -49,6 +49,23 @@ void ResourceManager::UnregisterResource(ID3D12Resource* pD3D12Resource) {
     std::lock_guard<std::mutex> lock(m_mutex);
     auto it = m_resources.find(pD3D12Resource);
     if (it != m_resources.end()) {
+        ID3D11Resource* pRes11 = it->second.pD3D11Resource;
+        if (pRes11) {
+            for (auto rtvIt = m_rtvs.begin(); rtvIt != m_rtvs.end();) {
+                if (rtvIt->second) {
+                    ID3D11Resource* underlying = nullptr;
+                    rtvIt->second->GetResource(&underlying);
+                    if (underlying == pRes11) {
+                        if (underlying) underlying->Release();
+                        rtvIt->second->Release();
+                        rtvIt = m_rtvs.erase(rtvIt);
+                        continue;
+                    }
+                    if (underlying) underlying->Release();
+                }
+                ++rtvIt;
+            }
+        }
         if (it->second.pD3D11Buffer) it->second.pD3D11Buffer->Release();
         if (it->second.pD3D11Texture) it->second.pD3D11Texture->Release();
         if (it->second.pD3D11Resource) it->second.pD3D11Resource->Release();
