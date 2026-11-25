@@ -2,11 +2,26 @@
 
 *Direct3D 12 to Direct3D 11 Compatibility Layer for Legacy NVIDIA Kepler Hardware*
 
+> **Author:** [HamzaShaikhAI](https://hamzashaikhai.com/keplerbridge/) — *Systems & Local-First AI Engineer*
+
+[![Star this repo if it saved you time](https://img.shields.io/github/stars/HamzaShaikhAI/KeplerBridge?style=for-the-badge&logo=github&label=%E2%AD%90%20Star%20This%20Repo%20If%20It%20Saved%20You%20Time&color=f59e0b)](https://github.com/HamzaShaikhAI/KeplerBridge/stargazers)
 [![Release Candidate](https://img.shields.io/badge/Candidate-v0.5.0--rc1-blue.svg)](releases/KeplerBridge-0.5.0-rc1/RELEASE_NOTES.md)
 [![Status](https://img.shields.io/badge/Status-Staged%20Candidate-orange.svg)](reports/PHASE12_14_2_FINAL_VERIFICATION_REPORT.md)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Platform: Windows x64](https://img.shields.io/badge/Platform-Windows%2010%20%2F%2011%20x64-blue.svg)](releases/KeplerBridge-0.5.0-rc1/SUPPORT_MATRIX.md)
 [![Standard: C++20](https://img.shields.io/badge/Standard-C%2B%2B20-green.svg)](https://en.cppreference.com/w/cpp/20)
+
+<p align="center">
+  <img src="assets/keplerbridge-demo.gif" alt="KeplerBridge DX12-to-DX11 Translation Before & After Architecture" width="760" />
+</p>
+
+> ### ⚡ 3-Command Source Build & Drop-In Quickstart
+> ```bash
+> git clone https://github.com/HamzaShaikhAI/KeplerBridge.git && cd KeplerBridge
+> cmake -B build -DCMAKE_BUILD_TYPE=Release && cmake --build build --config Release
+> copy build\Release\d3d12.dll <GameFolder>\ && copy kepler_bridge.ini <GameFolder>\
+> ```
+> *No driver hacks or Windows system changes required — or grab [`KeplerBridge-0.5.0-rc1-Windows-x64.zip`](releases/KeplerBridge-0.5.0-rc1/RELEASE_NOTES.md) + explore [Live GPU Benchmarks](https://hamzashaikhai.com/keplerbridge/#benchmark-explorer).*
 
 **KeplerBridge** is an open-source, high-performance Direct3D 12-to-Direct3D 11 compatibility and translation proxy engineered to enable modern Direct3D 12 workloads on legacy graphics hardware—specifically the **NVIDIA Kepler** architecture (GK107, GK104, GK208 / GeForce GT 740, GTX 750, GTX 760, GTX 770, GTX 780, GTX TITAN) and native Direct3D Feature Level 11_0 GPUs.
 
