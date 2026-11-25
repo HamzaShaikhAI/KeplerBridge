@@ -23,6 +23,13 @@
 > ```
 > *No driver hacks or Windows system changes required — or grab [`KeplerBridge-0.5.0-rc1-Windows-x64.zip`](releases/KeplerBridge-0.5.0-rc1/RELEASE_NOTES.md) + explore [Live GPU Benchmarks](https://hamzashaikhai.com/keplerbridge/#benchmark-explorer).*
 
+| Approach | KeplerBridge (`d3d12.dll`) | Official NVIDIA 472.12 Driver | Game `-dx11` Flag | CPU WARP Emulator |
+| :--- | :---: | :---: | :---: | :---: |
+| **DX12-Only Games on GT 740** | **Translates DXIL -> SM5.0 DXBC** | Crashes (`DXGI_ERROR_UNSUPPORTED`) | Ignored if no DX11 path | 1–4 FPS unusable |
+| **Windows System Safety** | **Drop-in user-space DLL (0 OS edits)** | Frozen at FL `11_0` | Safe | Safe |
+| **Warm Shader Cache** | **~0.03 ms SHA-256 disk hit** | None | Native | Slow JIT |
+| **Honest Tier-3 UE5 Boundary** | Transparently documents `-dx11` fallback | Crashes | Required for bindless UE5 | Unsupported |
+
 **KeplerBridge** is an open-source, high-performance Direct3D 12-to-Direct3D 11 compatibility and translation proxy engineered to enable modern Direct3D 12 workloads on legacy graphics hardware—specifically the **NVIDIA Kepler** architecture (GK107, GK104, GK208 / GeForce GT 740, GTX 750, GTX 760, GTX 770, GTX 780, GTX TITAN) and native Direct3D Feature Level 11_0 GPUs.
 
 Millions of capable graphics cards remain locked out of newer PC titles simply because modern game engines enforce Direct3D 12 API boundaries and compile shaders into Shader Model 6.0 DXIL bitcode. Because NVIDIA discontinued feature-level driver updates for Kepler at `D3D_FEATURE_LEVEL_11_0`, these GPUs cannot natively run D3D12 executables without translation.
